@@ -26,6 +26,11 @@ const (
 	PushMerge                       uint32 = 0x03
 )
 
+const (
+	PullAutoApply uint32 = 0x01
+	PullSeenFile  uint32 = 0x02
+)
+
 type Credentials struct {
 	Username string
 	Password string
@@ -45,7 +50,7 @@ type PullFunction struct {
 }
 
 type PullMetadata struct {
-	Unknown  uint32
+	Flags    uint32
 	Unknowns []uint32
 	Funcs    []PullFunction
 }
@@ -143,7 +148,7 @@ func DecodePullMetadata(payload []byte) (PullMetadata, error) {
 	d := NewDecoder(payload)
 	var out PullMetadata
 	var err error
-	if out.Unknown, err = d.DD(); err != nil {
+	if out.Flags, err = d.DD(); err != nil {
 		return out, err
 	}
 	if out.Unknowns, err = d.U32s(1_000_000); err != nil {

@@ -86,6 +86,9 @@ func TestFileHistoryAndSearchQueries(t *testing.T) {
 func TestDeleteCleanupAndEmptyDelete(t *testing.T) {
 	s, firstHash, secondHash, _ := populatedStore(t)
 	ctx := context.Background()
+	if _, err := s.Pull(ctx, [][]byte{firstHash, secondHash}); err != nil {
+		t.Fatal(err)
+	}
 	if deleted, err := s.DeleteHashes(ctx, nil); err != nil || deleted != 0 {
 		t.Fatalf("empty delete: %d, %v", deleted, err)
 	}
@@ -101,6 +104,13 @@ func TestDeleteCleanupAndEmptyDelete(t *testing.T) {
 	}
 	if stats != (Stats{}) {
 		t.Fatalf("orphan cleanup failed: %#v", stats)
+	}
+	var frequencies int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM function_frequencies").Scan(&frequencies); err != nil {
+		t.Fatal(err)
+	}
+	if frequencies != 0 {
+		t.Fatalf("orphan frequencies remained: %d", frequencies)
 	}
 }
 

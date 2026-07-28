@@ -204,7 +204,7 @@ func (s *Server) handlePacket(
 			hashes[i] = f.Hash
 		}
 		ctx, cancel := context.WithTimeout(parent, s.cfg.PullWait)
-		funcs, err := s.store.Pull(ctx, hashes)
+		funcs, err := s.store.PullWithFlags(ctx, hashes, req.Flags)
 		cancel()
 		if err != nil {
 			s.log.Error("pull metadata", "error", err)

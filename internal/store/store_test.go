@@ -67,7 +67,7 @@ func TestPushPullAndManagementQueries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got[0] == nil || got[0].Name != "parse_header" || got[0].Popularity != 2 {
+	if got[0] == nil || got[0].Name != "parse_header" || got[0].Popularity != 1 {
 		t.Fatalf("best pull result: %#v", got[0])
 	}
 	if got[1] != nil {
@@ -123,6 +123,37 @@ func TestPushPullAndManagementQueries(t *testing.T) {
 	if deleted != 2 {
 		t.Fatalf("deleted %d versions, want 2", deleted)
 	}
+}
+
+func TestPullFrequencyAndSeenFileFlag(t *testing.T) {
+	s, err := Open(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	hash := bytes.Repeat([]byte{0x91}, 16)
+	request := protocol.PushMetadata{
+		IDBPath: "frequency.i64", FilePath: "frequency.bin",
+		Funcs: []protocol.PushFunction{{Name: "popular", Hash: hash}},
+	}
+	if _, err := s.Push(ctx, PushIdentity{Hostname: "frequency-host"}, request); err != nil {
+		t.Fatal(err)
+	}
+	assertFrequency := func(flags, want uint32) {
+		t.Helper()
+		result, err := s.PullWithFlags(ctx, [][]byte{hash, hash}, flags)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result) != 2 || result[0] == nil || result[1] == nil ||
+			result[0].Popularity != want || result[1].Popularity != want {
+			t.Fatalf("frequency result %#v, want %d", result, want)
+		}
+	}
+	assertFrequency(0, 1)
+	assertFrequency(0, 2)
+	assertFrequency(protocol.PullSeenFile, 2)
 }
 
 func TestOfficialPushReplacementModes(t *testing.T) {

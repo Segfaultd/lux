@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -206,6 +207,10 @@ CREATE TABLE IF NOT EXISTS functions (
 );
 CREATE INDEX IF NOT EXISTS idx_functions_best ON functions(checksum, score DESC, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_functions_database ON functions(database_id);
+CREATE TABLE IF NOT EXISTS function_frequencies (
+  checksum BYTEA PRIMARY KEY,
+  frequency BIGINT NOT NULL DEFAULT 0 CHECK (frequency >= 0)
+);
 CREATE INDEX IF NOT EXISTS idx_databases_file ON databases(file_id);
 CREATE TABLE IF NOT EXISTS pushes (
   id BIGSERIAL PRIMARY KEY,
@@ -323,29 +328,69 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 }
 
 func (s *Store) Pull(ctx context.Context, hashes [][]byte) ([]*protocol.PullResultFunction, error) {
+	return s.PullWithFlags(ctx, hashes, 0)
+}
+
+func (s *Store) PullWithFlags(
+	ctx context.Context, hashes [][]byte, flags uint32,
+) ([]*protocol.PullResultFunction, error) {
 	const query = `
-SELECT fc.name, fc.length, fc.metadata,
-       (SELECT COUNT(*) FROM functions p WHERE p.checksum = fn.checksum)
+SELECT fc.name, fc.length, fc.metadata
 FROM function_changes fc
 JOIN functions fn ON fn.id=fc.function_id
 WHERE fn.checksum = $1
 ORDER BY fc.accepted DESC, fc.score DESC, fc.id ASC
 LIMIT 1`
-	stmt, err := s.db.PrepareContext(ctx, query)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 	defer stmt.Close()
 	out := make([]*protocol.PullResultFunction, len(hashes))
+	frequencies := make(map[string]uint32)
 	for i, hash := range hashes {
 		var f protocol.PullResultFunction
-		if err := stmt.QueryRowContext(ctx, hash).Scan(&f.Name, &f.Length, &f.Metadata, &f.Popularity); err != nil {
+		if err := stmt.QueryRowContext(ctx, hash).Scan(&f.Name, &f.Length, &f.Metadata); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
 			return nil, err
 		}
+		key := string(hash)
+		frequency, exists := frequencies[key]
+		if !exists {
+			var stored int64
+			if flags&protocol.PullSeenFile != 0 {
+				err = tx.QueryRowContext(ctx, `
+SELECT COALESCE((SELECT frequency FROM function_frequencies WHERE checksum=$1), 0)`,
+					hash).Scan(&stored)
+			} else {
+				err = tx.QueryRowContext(ctx, `
+INSERT INTO function_frequencies (checksum, frequency) VALUES ($1, 1)
+ON CONFLICT (checksum) DO UPDATE
+SET frequency=function_frequencies.frequency+1
+RETURNING frequency`, hash).Scan(&stored)
+			}
+			if err != nil {
+				return nil, err
+			}
+			if stored > math.MaxUint32 {
+				frequency = math.MaxUint32
+			} else {
+				frequency = uint32(stored)
+			}
+			frequencies[key] = frequency
+		}
+		f.Popularity = frequency
 		out[i] = &f
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -571,20 +616,16 @@ func (s *Store) ListFunctions(ctx context.Context, search string, limit, offset 
 	}
 	needle := "%" + strings.ToLower(search) + "%"
 	rows, err := s.db.QueryContext(ctx, `
-WITH popularity AS (
-  SELECT checksum, COUNT(*) AS value
-  FROM functions
-  GROUP BY checksum
-), ranked AS (
+WITH ranked AS (
   SELECT fn.checksum, fc.name, fc.length, fc.score, fc.changed_at,
-         popularity.value AS popularity,
+         LEAST(COALESCE(freq.frequency, 0), 4294967295) AS popularity,
          ROW_NUMBER() OVER (
            PARTITION BY fn.checksum
            ORDER BY fc.accepted DESC, fc.score DESC, fc.id ASC
          ) AS rank_no
   FROM function_changes fc
   JOIN functions fn ON fn.id=fc.function_id
-  JOIN popularity ON popularity.checksum=fn.checksum
+  LEFT JOIN function_frequencies freq ON freq.checksum=fn.checksum
 )
 SELECT encode(checksum, 'hex'), name, length, score, popularity, changed_at
 FROM ranked

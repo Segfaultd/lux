@@ -19,7 +19,7 @@ func TestDecodePullMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Unknown != 8 || len(got.Unknowns) != 2 || len(got.Funcs) != 2 ||
+	if got.Flags != 8 || len(got.Unknowns) != 2 || len(got.Funcs) != 2 ||
 		got.Funcs[1].Unknown != 4 || got.Funcs[1].Hash[0] != 0x22 {
 		t.Fatalf("unexpected pull request: %#v", got)
 	}

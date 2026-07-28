@@ -132,6 +132,16 @@ func TestHelloPushPullRoundTrip(t *testing.T) {
 	if err != nil || name != "known_function" {
 		t.Fatalf("pull name %q, error %v", name, err)
 	}
+	if _, err := d.DD(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Bytes(); err != nil {
+		t.Fatal(err)
+	}
+	frequency, err := d.DD()
+	if err != nil || frequency != 1 {
+		t.Fatalf("pull frequency %d, error %v", frequency, err)
+	}
 	cancel()
 	_ = conn.Close()
 	select {

@@ -27,7 +27,7 @@ is not a behavioral specification for Lux.
 | Server-side metadata merge push mode | Planned |
 | Immutable push and accepted-change history | Implemented |
 | Function-history retrieval and deletion | Implemented |
-| Function popularity/frequency | In progress |
+| Pull frequency and `PULL_MD_SEEN_FILE` behavior | Implemented |
 | Popular-functions RPC (`PKT_GET_POP`) | Planned |
 | Server-information RPC (`PKT_GET_LUMINA_INFO`) | Planned |
 | Regular users plus `UF_IS_ADMIN` and `UF_CAN_DEL_HISTORY` flags | Implemented |

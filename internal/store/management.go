@@ -303,6 +303,7 @@ func scanVersion(row scanner) (FunctionVersion, error) {
 
 func cleanupOrphans(ctx context.Context, tx *sql.Tx) error {
 	for _, query := range []string{
+		"DELETE FROM function_frequencies WHERE NOT EXISTS (SELECT 1 FROM functions WHERE checksum=function_frequencies.checksum)",
 		"DELETE FROM databases WHERE NOT EXISTS (SELECT 1 FROM functions WHERE database_id=databases.id)",
 		"DELETE FROM files WHERE NOT EXISTS (SELECT 1 FROM databases WHERE file_id=files.id)",
 		"DELETE FROM users WHERE NOT EXISTS (SELECT 1 FROM databases WHERE user_id=users.id)",
