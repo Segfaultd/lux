@@ -12,7 +12,7 @@ Lux was independently implemented from the protocol behavior in the sibling `lum
 - Immutable push and per-function revision history with native IDA history responses
 - PostgreSQL persistence with connection pooling, foreign keys, and automatic schema creation
 - Optional TLS with a PEM certificate and key
-- Embedded administration console for role-based accounts, IDB projects, pushes, semantic revision diffs, files, functions, structured/raw metadata versions, restore, and protected deletion
+- Embedded administration console for role-based accounts, live sessions, IDB projects, pushes, semantic revision diffs, files, functions, structured/raw metadata versions, restore, and protected deletion
 - JSON management API, Lumen-compatible read-only HTTP routes, health check, and Prometheus metrics
 - One static, CGO-free binary and a small scratch-based container image
 
@@ -124,6 +124,9 @@ IDA pins the Lumina server certificate. Copy the public certificate to `hexrays.
 | `PUT` | `/api/v1/accounts/{username}/password` | Rotate an account password |
 | `PATCH` | `/api/v1/accounts/{username}` | Change an account role or enabled state |
 | `DELETE` | `/api/v1/accounts/{username}` | Remove an account |
+| `DELETE` | `/api/v1/accounts/{username}/sessions` | Terminate every active session for an account |
+| `GET` | `/api/v1/sessions` | List authenticated Lumina sessions and activity |
+| `DELETE` | `/api/v1/sessions/{id}` | Terminate one active Lumina session |
 
 Deletion must be enabled with `LUX_ALLOW_DELETES=true`. Account management always requires a configured admin token, and all other mutations require it when configured. Send `Authorization: Bearer <token>`; the browser console keeps it only in session storage.
 

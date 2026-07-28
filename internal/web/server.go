@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/metadata"
 	"github.com/segfaultd/lux/internal/observability"
+	"github.com/segfaultd/lux/internal/session"
 	"github.com/segfaultd/lux/internal/store"
 )
 
@@ -28,16 +30,33 @@ import (
 var assets embed.FS
 
 type Server struct {
-	cfg     config.Config
-	store   *store.Store
-	auth    *authn.Service
-	metrics *observability.Metrics
-	log     *slog.Logger
-	handler http.Handler
+	cfg      config.Config
+	store    *store.Store
+	auth     *authn.Service
+	metrics  *observability.Metrics
+	sessions *session.Registry
+	log      *slog.Logger
+	handler  http.Handler
 }
 
 func New(cfg config.Config, store *store.Store, metrics *observability.Metrics, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: store, auth: authn.New(store), metrics: metrics, log: log}
+	return NewWithSessions(cfg, store, metrics, log, session.NewRegistry())
+}
+
+func NewWithSessions(
+	cfg config.Config,
+	store *store.Store,
+	metrics *observability.Metrics,
+	log *slog.Logger,
+	sessions *session.Registry,
+) *Server {
+	if sessions == nil {
+		sessions = session.NewRegistry()
+	}
+	s := &Server{
+		cfg: cfg, store: store, auth: authn.New(store), metrics: metrics,
+		sessions: sessions, log: log,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /metrics", s.prometheus)
@@ -69,6 +88,9 @@ func New(cfg config.Config, store *store.Store, metrics *observability.Metrics, 
 	mux.HandleFunc("PUT /api/v1/accounts/{username}/password", s.setAccountPassword)
 	mux.HandleFunc("PATCH /api/v1/accounts/{username}", s.setAccountEnabled)
 	mux.HandleFunc("DELETE /api/v1/accounts/{username}", s.deleteAccount)
+	mux.HandleFunc("DELETE /api/v1/accounts/{username}/sessions", s.terminateAccountSessions)
+	mux.HandleFunc("GET /api/v1/sessions", s.listSessions)
+	mux.HandleFunc("DELETE /api/v1/sessions/{id}", s.terminateSession)
 	// Lumen-compatible read-only HTTP routes.
 	mux.HandleFunc("GET /api/files/{md5}", s.legacyFile)
 	mux.HandleFunc("GET /api/funcs/{hash}", s.legacyFunction)
@@ -211,6 +233,50 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, account)
+}
+
+func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAccountAdmin(w, r) {
+		return
+	}
+	sessions := s.sessions.List()
+	writeJSON(w, http.StatusOK, map[string]any{"items": sessions, "count": len(sessions)})
+}
+
+func (s *Server) terminateSession(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAccountAdmin(w, r) {
+		return
+	}
+	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	if err != nil || id == 0 {
+		writeError(w, http.StatusBadRequest, "session id must be a positive integer")
+		return
+	}
+	terminated, err := s.sessions.Terminate(id)
+	if errors.Is(err, session.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if err != nil && !errors.Is(err, net.ErrClosed) {
+		s.internalError(w, "terminate Lumina session", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"terminated": terminated})
+}
+
+func (s *Server) terminateAccountSessions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAccountAdmin(w, r) {
+		return
+	}
+	username := strings.TrimSpace(r.PathValue("username"))
+	if username == "" {
+		writeError(w, http.StatusBadRequest, "username is required")
+		return
+	}
+	terminated := s.sessions.TerminateUsername(username)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"username": username, "terminated": terminated,
+	})
 }
 
 func (s *Server) requireAccountAdmin(w http.ResponseWriter, r *http.Request) bool {

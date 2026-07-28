@@ -125,4 +125,15 @@ func TestRegistryTermination(t *testing.T) {
 	if _, err := clients[2].Write([]byte("closed")); err == nil {
 		t.Fatal("terminated session remained connected")
 	}
+	caseClient, caseServer := net.Pipe()
+	clients = append(clients, caseClient)
+	registry.Register(Identity{
+		AccountID: 9, Username: "CaseUser", Role: access.RoleReader,
+	}, Track(caseServer))
+	if terminated := registry.TerminateUsername("caseuser"); terminated != 1 {
+		t.Fatalf("username termination matched %d sessions", terminated)
+	}
+	if _, err := caseClient.Write([]byte("closed")); err == nil {
+		t.Fatal("username-terminated session remained connected")
+	}
 }

@@ -72,7 +72,7 @@ func run(parent context.Context, args []string) error {
 	defer stop()
 	metrics := observability.NewMetrics()
 	luminaServer := lumina.New(cfg, db, metrics, log)
-	webServer := management.New(cfg, db, metrics, log)
+	webServer := management.NewWithSessions(cfg, db, metrics, log, luminaServer.Sessions())
 	httpServer := &http.Server{
 		Handler:           webServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/protocol"
+	"github.com/segfaultd/lux/internal/session"
 	"github.com/segfaultd/lux/internal/store"
 	"github.com/segfaultd/lux/internal/testdb"
 )
@@ -54,9 +56,9 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 		status     int
 		bodyPieces []string
 	}{
-		{"index", "/", 200, []string{"Lux administration", "Projects / IDBs", "Push and metadata history", "Functions and metadata"}},
+		{"index", "/", 200, []string{"Lux administration", "Active Lumina sessions", "Projects / IDBs", "Push and metadata history", "Functions and metadata"}},
 		{"stylesheet", "/styles.css", 200, []string{".topbar", ".version", ".history-filter", ".metadata-chunk", ".metadata-row"}},
-		{"script", "/app.js", 200, []string{"loadCollection", "/api/v1/projects", "/api/v1/metadata", "/api/v1/history", "openPush", "openMetadataExplorer", "saveStructuredChunk"}},
+		{"script", "/app.js", 200, []string{"loadCollection", "loadSessions", "/api/v1/sessions", "/api/v1/projects", "/api/v1/metadata", "/api/v1/history", "openPush", "openMetadataExplorer", "saveStructuredChunk"}},
 		{"health", "/healthz", 200, []string{`"status":"ok"`, `"functions":1`}},
 		{"metrics", "/metrics", 200, []string{"lux_connections_total"}},
 		{"config", "/api/v1/config", 200, []string{`"server_name":"route-test"`, `"tls":true`, `"account_management":false`, `"history_limit":12`}},
@@ -493,6 +495,100 @@ func TestAccountManagementAPI(t *testing.T) {
 		t.Fatalf("closed database account create status %d", response.StatusCode)
 	}
 	response.Body.Close()
+}
+
+func TestSessionManagementAPI(t *testing.T) {
+	db, err := store.Open(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	registry := session.NewRegistry()
+	var clients []net.Conn
+	for _, identity := range []session.Identity{
+		{
+			AccountID: 1, Username: "Analyst", Role: access.RoleContributor,
+			RemoteAddress: "192.0.2.10:4567", ProtocolVersion: 5,
+		},
+		{
+			AccountID: 2, Username: "reader", Role: access.RoleReader,
+			RemoteAddress: "192.0.2.11:4568", ProtocolVersion: 4,
+		},
+	} {
+		client, peer := net.Pipe()
+		clients = append(clients, client)
+		registry.Register(identity, session.Track(peer))
+	}
+	t.Cleanup(func() {
+		for _, client := range clients {
+			_ = client.Close()
+		}
+	})
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := httptest.NewServer(NewWithSessions(
+		config.Config{AdminToken: "secret"}, db, observability.NewMetrics(), log, registry,
+	).Handler())
+	defer server.Close()
+
+	response := accountRequest(t, server, http.MethodGet, "/api/v1/sessions", "", "")
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthorized list status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = accountRequest(t, server, http.MethodGet, "/api/v1/sessions", "", "secret")
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK ||
+		!strings.Contains(string(body), `"count":2`) ||
+		!strings.Contains(string(body), `"username":"Analyst"`) ||
+		!strings.Contains(string(body), `"remote_address":"192.0.2.10:4567"`) {
+		t.Fatalf("session list status %d: %s", response.StatusCode, body)
+	}
+
+	for _, test := range []struct {
+		name, path string
+		status     int
+	}{
+		{"invalid", "/api/v1/sessions/nope", http.StatusBadRequest},
+		{"zero", "/api/v1/sessions/0", http.StatusBadRequest},
+		{"missing", "/api/v1/sessions/999", http.StatusNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := accountRequest(t, server, http.MethodDelete, test.path, "", "secret")
+			defer response.Body.Close()
+			if response.StatusCode != test.status {
+				t.Fatalf("status %d, want %d", response.StatusCode, test.status)
+			}
+		})
+	}
+
+	response = accountRequest(t, server, http.MethodDelete, "/api/v1/sessions/1", "", "secret")
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK ||
+		!strings.Contains(string(body), `"username":"Analyst"`) {
+		t.Fatalf("terminate status %d: %s", response.StatusCode, body)
+	}
+	if _, err := clients[0].Write([]byte("closed")); err == nil {
+		t.Fatal("terminated client remained connected")
+	}
+
+	response = accountRequest(t, server, http.MethodDelete, "/api/v1/accounts/READER/sessions", "", "secret")
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"terminated":1`) {
+		t.Fatalf("account termination status %d: %s", response.StatusCode, body)
+	}
+	if _, err := clients[1].Write([]byte("closed")); err == nil {
+		t.Fatal("account-terminated client remained connected")
+	}
+
+	response = accountRequest(t, server, http.MethodGet, "/api/v1/sessions", "", "secret")
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"count":0`) {
+		t.Fatalf("empty session list status %d: %s", response.StatusCode, body)
+	}
 }
 
 func TestManagementDeleteAuthorizationAndOutcomes(t *testing.T) {

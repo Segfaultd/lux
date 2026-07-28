@@ -23,6 +23,7 @@
     <nav aria-label="Management sections">
       <button class="active" data-section="overview">Overview</button>
       <button data-section="accounts">Authentication</button>
+      <button data-section="sessions">Sessions</button>
       <button data-section="projects">Projects / IDBs</button>
       <button data-section="history">Push history</button>
       <button data-section="functions">Functions</button>
@@ -54,6 +55,21 @@
         <div class="table-wrap"><table>
           <thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Password</th><th>Last login</th><th>Created</th><th>Actions</th></tr></thead>
           <tbody id="accounts-table"></tbody>
+        </table></div>
+      </section>
+
+      <section id="section-sessions" class="page">
+        <h1>Active Lumina sessions</h1>
+        <p>Inspect authenticated IDA connections and terminate individual sessions. An admin token is required.</p>
+        <form id="session-filter" class="toolbar">
+          <input name="q" placeholder="Username, host, address, or operation">
+          <button type="submit">Filter</button>
+          <button type="reset">Clear</button>
+          <button type="button" data-reload="sessions">Reload</button>
+        </form>
+        <div class="table-wrap"><table>
+          <thead><tr><th>ID</th><th>User / role</th><th>Remote / host</th><th>Protocol</th><th>Connected</th><th>Activity</th><th>Operation</th><th>Requests / errors</th><th>Traffic</th><th></th></tr></thead>
+          <tbody id="sessions-table"></tbody>
         </table></div>
       </section>
 

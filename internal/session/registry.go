@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -168,27 +169,41 @@ func (r *Registry) Get(id uint64) (Session, error) {
 }
 
 func (r *Registry) Terminate(id uint64) (Session, error) {
-	r.mu.RLock()
+	r.mu.Lock()
 	current := r.sessions[id]
 	if current == nil {
-		r.mu.RUnlock()
+		r.mu.Unlock()
 		return Session{}, ErrNotFound
 	}
 	result := snapshot(current)
 	conn := current.conn
-	r.mu.RUnlock()
+	delete(r.sessions, id)
+	r.mu.Unlock()
 	return result, conn.Close()
 }
 
 func (r *Registry) TerminateAccount(accountID int64) int {
-	r.mu.RLock()
+	return r.terminateMatching(func(current Session) bool {
+		return current.AccountID == accountID
+	})
+}
+
+func (r *Registry) TerminateUsername(username string) int {
+	return r.terminateMatching(func(current Session) bool {
+		return strings.EqualFold(current.Username, username)
+	})
+}
+
+func (r *Registry) terminateMatching(matches func(Session) bool) int {
+	r.mu.Lock()
 	var connections []*Connection
-	for _, current := range r.sessions {
-		if current.session.AccountID == accountID {
+	for id, current := range r.sessions {
+		if matches(current.session) {
 			connections = append(connections, current.conn)
+			delete(r.sessions, id)
 		}
 	}
-	r.mu.RUnlock()
+	r.mu.Unlock()
 	for _, conn := range connections {
 		_ = conn.Close()
 	}

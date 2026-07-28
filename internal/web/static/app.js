@@ -8,6 +8,7 @@ const state = {
     files: { page: 0, query: "", more: false },
   },
   history: { view: "history", page: 0, more: false },
+  sessionQuery: "",
   limit: 50,
 };
 const $ = (id) => document.getElementById(id);
@@ -129,6 +130,7 @@ async function loadAccounts() {
         <td>${esc(date(account.created_at))}</td>
         <td class="actions">
           <button data-account="password" data-username="${esc(account.username)}">Set password</button>
+          <button data-account="sessions" data-username="${esc(account.username)}">Disconnect sessions</button>
           <button data-account="toggle" data-enabled="${account.enabled}" data-username="${esc(account.username)}">${account.enabled ? "Disable" : "Enable"}</button>
           <button class="danger" data-account="delete" data-username="${esc(account.username)}">Delete</button>
         </td>
@@ -148,12 +150,57 @@ async function accountAction(button) {
       await api(`/api/v1/accounts/${encodeURIComponent(username)}/password`, adminOptions("PUT", { password }));
     } else if (button.dataset.account === "toggle") {
       await api(`/api/v1/accounts/${encodeURIComponent(username)}`, adminOptions("PATCH", { enabled: button.dataset.enabled !== "true" }));
+    } else if (button.dataset.account === "sessions") {
+      if (!confirm(`Disconnect every active session for "${username}"?`)) return;
+      const result = await api(`/api/v1/accounts/${encodeURIComponent(username)}/sessions`, adminOptions("DELETE"));
+      notify(`Disconnected ${result.terminated} session(s) for ${username}.`);
+      await loadSessions();
+      return;
     } else {
       if (!confirm(`Delete login account "${username}"? Historical attribution remains.`)) return;
       await api(`/api/v1/accounts/${encodeURIComponent(username)}`, adminOptions("DELETE"));
     }
     notify(`Account ${username} updated.`);
     await Promise.all([loadAccounts(), refreshStats()]);
+  } catch (error) { handleError(error); }
+}
+
+async function loadSessions() {
+  const body = $("sessions-table");
+  body.innerHTML = emptyRow("Loading…");
+  try {
+    const data = await api("/api/v1/sessions", adminOptions());
+    const query = state.sessionQuery.toLocaleLowerCase();
+    const sessions = data.items.filter((item) => !query || [
+      item.username, item.role, item.remote_address, item.hostname,
+      item.current_operation, item.last_operation,
+    ].some((value) => String(value || "").toLocaleLowerCase().includes(query)));
+    body.innerHTML = sessions.length ? sessions.map((item) => `
+      <tr>
+        <td>${item.id}</td>
+        <td><strong>${esc(item.username)}</strong><br>${esc(item.role)}</td>
+        <td><code>${esc(item.remote_address)}</code><br>${esc(item.hostname || "—")}</td>
+        <td>${item.protocol_version}</td>
+        <td>${esc(date(item.connected_at))}</td>
+        <td>${esc(date(item.last_activity_at))}</td>
+        <td>${esc(item.current_operation || item.last_operation || "idle")}</td>
+        <td>${number.format(item.requests)} / ${number.format(item.errors)}</td>
+        <td>${number.format(item.bytes_read)} in / ${number.format(item.bytes_written)} out</td>
+        <td><button class="danger" data-session-terminate="${item.id}">Terminate</button></td>
+      </tr>`).join("") : emptyRow(query ? "No matching sessions." : "No active sessions.");
+  } catch (error) {
+    body.innerHTML = emptyRow(error.message);
+    handleError(error);
+  }
+}
+
+async function terminateSession(button) {
+  const id = button.dataset.sessionTerminate;
+  if (!confirm(`Terminate Lumina session ${id}?`)) return;
+  try {
+    await api(`/api/v1/sessions/${id}`, adminOptions("DELETE"));
+    notify(`Session ${id} terminated.`);
+    await loadSessions();
   } catch (error) { handleError(error); }
 }
 
@@ -711,6 +758,7 @@ function showSection(name) {
   document.querySelectorAll(".page").forEach((section) => section.classList.toggle("active", section.id === `section-${name}`));
   document.querySelectorAll("nav [data-section]").forEach((button) => button.classList.toggle("active", button.dataset.section === name));
   if (name === "accounts") loadAccounts();
+  if (name === "sessions") loadSessions();
   if (name === "history") loadHistory();
   if (state.pages[name]) loadCollection(name);
 }
@@ -719,7 +767,11 @@ document.addEventListener("click", (event) => {
   const section = event.target.closest("[data-section]");
   if (section) showSection(section.dataset.section);
   const reload = event.target.closest("[data-reload]");
-  if (reload) reload.dataset.reload === "accounts" ? loadAccounts() : loadCollection(reload.dataset.reload);
+  if (reload) {
+    if (reload.dataset.reload === "accounts") loadAccounts();
+    else if (reload.dataset.reload === "sessions") loadSessions();
+    else loadCollection(reload.dataset.reload);
+  }
   const project = event.target.closest("[data-project-id]");
   if (project) openProject(project.dataset.projectId);
   const history = event.target.closest("[data-history-id]");
@@ -734,6 +786,8 @@ document.addEventListener("click", (event) => {
   if (openFn) openFunction(openFn.dataset.openFunction);
   const account = event.target.closest("[data-account]");
   if (account) accountAction(account);
+  const session = event.target.closest("[data-session-terminate]");
+  if (session) terminateSession(session);
   const deleteButton = event.target.closest("[data-delete-version]");
   if (deleteButton) deleteVersion(deleteButton);
   const explorer = event.target.closest("[data-explore-version]");
@@ -775,6 +829,17 @@ $("history-filter").addEventListener("reset", () => {
   setTimeout(() => {
     state.history.page = 0;
     loadHistory();
+  }, 0);
+});
+$("session-filter").addEventListener("submit", (event) => {
+  event.preventDefault();
+  state.sessionQuery = new FormData(event.target).get("q").trim();
+  loadSessions();
+});
+$("session-filter").addEventListener("reset", () => {
+  setTimeout(() => {
+    state.sessionQuery = "";
+    loadSessions();
   }, 0);
 });
 $("history-pager").addEventListener("click", (event) => {
