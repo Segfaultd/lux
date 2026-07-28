@@ -14,68 +14,35 @@ type Comment struct {
 	Text       string  `json:"text"`
 }
 
-type chunk struct {
-	Code uint32
-	Data []byte
-}
-
 func Parse(data []byte) ([]Comment, error) {
-	d := protocol.NewDecoder(data)
+	doc, err := Decode(data)
+	if err != nil {
+		return nil, err
+	}
 	var comments []Comment
-	for d.Remaining() > 0 {
-		code, err := d.DD()
-		if err != nil {
-			return nil, err
-		}
-		payload, err := d.Bytes()
-		if err != nil {
-			return nil, err
-		}
-		c := chunk{Code: code, Data: payload}
-		switch c.Code {
-		case 3, 4:
-			if len(c.Data) > 0 {
+	for _, chunk := range doc.Chunks {
+		switch chunk.Code {
+		case KeyFunctionComment, KeyFunctionRepeatComment:
+			if chunk.Error != "" {
+				return nil, fmt.Errorf("metadata chunk %d (%s): %s", chunk.Index, chunk.Key, chunk.Error)
+			}
+			if chunk.Text != nil && *chunk.Text != "" {
 				comments = append(comments, Comment{
 					Type:       "function",
-					Repeatable: c.Code == 4,
-					Text:       string(c.Data),
+					Repeatable: chunk.Code == KeyFunctionRepeatComment,
+					Text:       *chunk.Text,
 				})
 			}
-		case 5, 6:
-			seq, err := parseOffsetSequence(c.Data, func(d *protocol.Decoder) ([]Comment, error) {
-				text, err := d.Bytes()
-				if err != nil {
-					return nil, err
-				}
-				return []Comment{{Type: "byte", Repeatable: c.Code == 6, Text: string(text)}}, nil
-			})
-			if err != nil {
-				return nil, err
+		case KeyInstructionComments, KeyInstructionRepeat, KeyExtraComments:
+			if chunk.Error != "" {
+				return nil, fmt.Errorf("metadata chunk %d (%s): %s", chunk.Index, chunk.Key, chunk.Error)
 			}
-			comments = append(comments, seq...)
-		case 7:
-			seq, err := parseOffsetSequence(c.Data, func(d *protocol.Decoder) ([]Comment, error) {
-				anterior, err := d.Bytes()
-				if err != nil {
-					return nil, err
+			for _, comment := range chunk.Comments {
+				if comment.Type == "instruction" {
+					comment.Type = "byte"
 				}
-				posterior, err := d.Bytes()
-				if err != nil {
-					return nil, err
-				}
-				var out []Comment
-				if len(anterior) > 0 {
-					out = append(out, Comment{Type: "anterior", Text: string(anterior)})
-				}
-				if len(posterior) > 0 {
-					out = append(out, Comment{Type: "posterior", Text: string(posterior)})
-				}
-				return out, nil
-			})
-			if err != nil {
-				return nil, err
+				comments = append(comments, comment)
 			}
-			comments = append(comments, seq...)
 		}
 	}
 	return comments, nil
