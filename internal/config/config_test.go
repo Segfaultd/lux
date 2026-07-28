@@ -7,7 +7,7 @@ import (
 )
 
 var configEnvironment = []string{
-	"LUX_LUMINA_ADDR", "LUX_HTTP_ADDR", "LUX_DATABASE", "LUX_SERVER_NAME",
+	"LUX_LUMINA_ADDR", "LUX_HTTP_ADDR", "LUX_DATABASE_URL", "LUX_SERVER_NAME",
 	"LUX_USERNAME", "LUX_PASSWORD", "LUX_ADMIN_TOKEN", "LUX_ALLOW_DELETES",
 	"LUX_HISTORY_LIMIT", "LUX_TLS_CERT", "LUX_TLS_KEY", "LUX_COMMAND_TIMEOUT",
 	"LUX_HELLO_TIMEOUT", "LUX_PULL_TIMEOUT", "LUX_SHUTDOWN_TIMEOUT",
@@ -19,7 +19,8 @@ func TestParseDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.LuminaAddr != ":1234" || cfg.HTTPAddr != ":8080" || cfg.DatabasePath != "lux.db" {
+	if cfg.LuminaAddr != ":1234" || cfg.HTTPAddr != ":8080" ||
+		cfg.DatabaseURL != "postgres://lux:lux@127.0.0.1:5432/lux?sslmode=disable" {
 		t.Fatalf("unexpected addresses/database: %#v", cfg)
 	}
 	if cfg.ServerName != "lux" || cfg.Username != "guest" || cfg.Password != "" {
@@ -38,7 +39,7 @@ func TestParseEnvironmentAndFlagPrecedence(t *testing.T) {
 	unsetConfigEnvironment(t)
 	t.Setenv("LUX_LUMINA_ADDR", "127.0.0.1:2000")
 	t.Setenv("LUX_HTTP_ADDR", "127.0.0.1:3000")
-	t.Setenv("LUX_DATABASE", "environment.db")
+	t.Setenv("LUX_DATABASE_URL", "postgres://environment")
 	t.Setenv("LUX_SERVER_NAME", "environment")
 	t.Setenv("LUX_USERNAME", "analyst")
 	t.Setenv("LUX_PASSWORD", "password")
@@ -54,7 +55,7 @@ func TestParseEnvironmentAndFlagPrecedence(t *testing.T) {
 
 	cfg, err := Parse([]string{
 		"-server-name", "flag",
-		"-database", "flag.db",
+		"-database-url", "postgres://flag",
 		"-history-limit", "9",
 		"-allow-deletes=false",
 	})
@@ -64,7 +65,7 @@ func TestParseEnvironmentAndFlagPrecedence(t *testing.T) {
 	if cfg.LuminaAddr != "127.0.0.1:2000" || cfg.HTTPAddr != "127.0.0.1:3000" {
 		t.Fatalf("environment addresses not used: %#v", cfg)
 	}
-	if cfg.ServerName != "flag" || cfg.DatabasePath != "flag.db" ||
+	if cfg.ServerName != "flag" || cfg.DatabaseURL != "postgres://flag" ||
 		cfg.HistoryLimit != 9 || cfg.AllowDeletes {
 		t.Fatalf("flags did not override environment: %#v", cfg)
 	}

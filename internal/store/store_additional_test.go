@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/segfaultd/lux/internal/protocol"
+	"github.com/segfaultd/lux/internal/testdb"
 )
 
 func TestFileHistoryAndSearchQueries(t *testing.T) {
@@ -105,8 +105,8 @@ func TestDeleteCleanupAndEmptyDelete(t *testing.T) {
 }
 
 func TestStoreValidationAndClosedDatabaseErrors(t *testing.T) {
-	if _, err := Open(filepath.Join(t.TempDir(), "missing", "lux.db")); err == nil {
-		t.Fatal("database in missing parent unexpectedly opened")
+	if _, err := Open("postgres://lux:lux@127.0.0.1:1/lux?sslmode=disable&connect_timeout=1"); err == nil {
+		t.Fatal("unreachable PostgreSQL server unexpectedly opened")
 	}
 	if _, err := parseHash("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"); err == nil {
 		t.Fatal("invalid hexadecimal hash accepted")
@@ -115,10 +115,9 @@ func TestStoreValidationAndClosedDatabaseErrors(t *testing.T) {
 		t.Fatal("short hash accepted")
 	}
 
-	pathWithSpace := filepath.Join(t.TempDir(), "lux data.db")
-	s, err := Open(pathWithSpace)
+	s, err := Open(testdb.URL(t))
 	if err != nil {
-		t.Fatalf("database path with spaces: %v", err)
+		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -159,7 +158,7 @@ func TestStoreValidationAndClosedDatabaseErrors(t *testing.T) {
 }
 
 func TestPushCanceledContext(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "lux.db"))
+	s, err := Open(testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,9 +171,43 @@ func TestPushCanceledContext(t *testing.T) {
 	}
 }
 
+func TestPushNormalizesNilIdentityAndMigrationIsIdempotent(t *testing.T) {
+	s, err := Open(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if err := s.migrate(ctx); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	request := protocol.PushMetadata{
+		IDBPath:  "nil-identity.i64",
+		FilePath: "nil-identity.bin",
+		Funcs: []protocol.PushFunction{{
+			Name: "nil_identity",
+			Hash: bytes.Repeat([]byte{0x7f}, 16),
+		}},
+	}
+	status, err := s.Push(ctx, PushIdentity{}, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status) != 1 || status[0] != 1 {
+		t.Fatalf("unexpected push status: %v", status)
+	}
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Users != 1 || stats.Functions != 1 {
+		t.Fatalf("unexpected stats: %#v", stats)
+	}
+}
+
 func populatedStore(t *testing.T) (*Store, []byte, []byte, [16]byte) {
 	t.Helper()
-	s, err := Open(filepath.Join(t.TempDir(), "lux.db"))
+	s, err := Open(testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

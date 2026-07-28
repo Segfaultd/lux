@@ -11,7 +11,7 @@ import (
 type Config struct {
 	LuminaAddr   string
 	HTTPAddr     string
-	DatabasePath string
+	DatabaseURL  string
 	ServerName   string
 	Username     string
 	Password     string
@@ -31,7 +31,7 @@ func Parse(args []string) (Config, error) {
 	fs := flag.NewFlagSet("lux", flag.ContinueOnError)
 	fs.StringVar(&cfg.LuminaAddr, "lumina-addr", env("LUX_LUMINA_ADDR", ":1234"), "Lumina TCP listen address")
 	fs.StringVar(&cfg.HTTPAddr, "http-addr", env("LUX_HTTP_ADDR", ":8080"), "management HTTP listen address")
-	fs.StringVar(&cfg.DatabasePath, "database", env("LUX_DATABASE", "lux.db"), "SQLite database path")
+	fs.StringVar(&cfg.DatabaseURL, "database-url", env("LUX_DATABASE_URL", "postgres://lux:lux@127.0.0.1:5432/lux?sslmode=disable"), "PostgreSQL connection URL (empty uses PG* environment variables)")
 	fs.StringVar(&cfg.ServerName, "server-name", env("LUX_SERVER_NAME", "lux"), "name displayed to IDA clients")
 	fs.StringVar(&cfg.Username, "username", env("LUX_USERNAME", "guest"), "Lumina login username")
 	fs.StringVar(&cfg.Password, "password", env("LUX_PASSWORD", ""), "Lumina login password (empty accepts any password)")

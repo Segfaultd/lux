@@ -3,14 +3,14 @@ package store
 import (
 	"bytes"
 	"context"
-	"path/filepath"
 	"testing"
 
 	"github.com/segfaultd/lux/internal/protocol"
+	"github.com/segfaultd/lux/internal/testdb"
 )
 
 func TestPushPullAndManagementQueries(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "lux.db"))
+	s, err := Open(testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

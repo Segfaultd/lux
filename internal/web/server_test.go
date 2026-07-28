@@ -6,17 +6,17 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/store"
+	"github.com/segfaultd/lux/internal/testdb"
 )
 
 func TestManagementUIAndAPI(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "lux.db"))
+	db, err := store.Open(testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

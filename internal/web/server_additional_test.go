@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/protocol"
 	"github.com/segfaultd/lux/internal/store"
+	"github.com/segfaultd/lux/internal/testdb"
 )
 
 func TestEveryReadOnlyManagementRoute(t *testing.T) {
@@ -208,7 +208,7 @@ func TestWebHelpers(t *testing.T) {
 
 func populatedWebStore(t *testing.T) (*store.Store, string, string) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "lux.db"))
+	db, err := store.Open(testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

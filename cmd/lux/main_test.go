@@ -3,10 +3,11 @@ package main
 import (
 	"context"
 	"net"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/segfaultd/lux/internal/testdb"
 )
 
 func TestRunValidationAndStartupErrors(t *testing.T) {
@@ -17,7 +18,7 @@ func TestRunValidationAndStartupErrors(t *testing.T) {
 	})
 	t.Run("database error", func(t *testing.T) {
 		err := run(context.Background(), []string{
-			"-database", filepath.Join(t.TempDir(), "missing", "lux.db"),
+			"-database-url", "postgres://lux:lux@127.0.0.1:1/lux?sslmode=disable&connect_timeout=1",
 		})
 		if err == nil || !strings.Contains(err.Error(), "open database") {
 			t.Fatalf("got %v", err)
@@ -30,7 +31,7 @@ func TestRunValidationAndStartupErrors(t *testing.T) {
 		}
 		defer listener.Close()
 		err = run(context.Background(), []string{
-			"-database", filepath.Join(t.TempDir(), "lux.db"),
+			"-database-url", testdb.URL(t),
 			"-lumina-addr", listener.Addr().String(),
 			"-http-addr", "127.0.0.1:0",
 		})
@@ -45,7 +46,7 @@ func TestRunValidationAndStartupErrors(t *testing.T) {
 		}
 		defer listener.Close()
 		err = run(context.Background(), []string{
-			"-database", filepath.Join(t.TempDir(), "lux.db"),
+			"-database-url", testdb.URL(t),
 			"-lumina-addr", "127.0.0.1:0",
 			"-http-addr", listener.Addr().String(),
 		})
@@ -58,10 +59,10 @@ func TestRunValidationAndStartupErrors(t *testing.T) {
 func TestRunGracefulCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	databasePath := filepath.Join(t.TempDir(), "lux.db")
+	databaseURL := testdb.URL(t)
 	go func() {
 		done <- run(ctx, []string{
-			"-database", databasePath,
+			"-database-url", databaseURL,
 			"-lumina-addr", "127.0.0.1:0",
 			"-http-addr", "127.0.0.1:0",
 			"-shutdown-timeout", "1s",

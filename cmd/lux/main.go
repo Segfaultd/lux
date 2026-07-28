@@ -41,7 +41,7 @@ func run(parent context.Context, args []string) error {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	db, err := store.Open(cfg.DatabasePath)
+	db, err := store.Open(cfg.DatabaseURL)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -84,7 +84,7 @@ func run(parent context.Context, args []string) error {
 		"version", version,
 		"lumina", luminaListener.Addr(),
 		"management", "http://"+httpListener.Addr().String(),
-		"database", cfg.DatabasePath,
+		"database", "postgresql",
 		"tls", cfg.TLSCert != "")
 
 	var serveErr error

@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,10 +13,11 @@ import (
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/protocol"
 	"github.com/segfaultd/lux/internal/store"
+	"github.com/segfaultd/lux/internal/testdb"
 )
 
 func TestHelloPushPullRoundTrip(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "lux.db"))
+	db, err := store.Open(testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

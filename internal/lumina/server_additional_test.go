@@ -24,6 +24,7 @@ import (
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/protocol"
 	"github.com/segfaultd/lux/internal/store"
+	"github.com/segfaultd/lux/internal/testdb"
 )
 
 func TestHelloVariantsAndWrongPort(t *testing.T) {
@@ -381,7 +382,7 @@ func TestServeConfigurationAndCancellation(t *testing.T) {
 
 func newLuminaTestServer(t *testing.T, cfg config.Config) *Server {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "lux.db"))
+	db, err := store.Open(testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +516,7 @@ func deleteRequest(hash []byte) []byte {
 
 func populatedLuminaStore(t *testing.T) (*store.Store, []byte) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "lux.db"))
+	db, err := store.Open(testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

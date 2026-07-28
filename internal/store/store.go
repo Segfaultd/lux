@@ -6,14 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/url"
-	"path/filepath"
 	"strings"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/segfaultd/lux/internal/metadata"
 	"github.com/segfaultd/lux/internal/protocol"
-	_ "modernc.org/sqlite"
 )
 
 type Store struct {
@@ -66,24 +64,14 @@ type PushIdentity struct {
 	Hostname      string
 }
 
-func Open(path string) (*Store, error) {
-	absolute, err := filepath.Abs(path)
+func Open(connectionURL string) (*Store, error) {
+	db, err := sql.Open("pgx", connectionURL)
 	if err != nil {
 		return nil, err
 	}
-	databaseURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
-	query := databaseURL.Query()
-	query.Add("_pragma", "foreign_keys(1)")
-	query.Add("_pragma", "journal_mode(WAL)")
-	query.Add("_pragma", "busy_timeout(5000)")
-	databaseURL.RawQuery = query.Encode()
-	dsn := databaseURL.String()
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(8)
+	db.SetMaxOpenConns(16)
+	db.SetMaxIdleConns(4)
+	db.SetConnMaxLifetime(30 * time.Minute)
 	db.SetConnMaxIdleTime(5 * time.Minute)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -104,36 +92,36 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) migrate(ctx context.Context) error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY,
-  license_id BLOB NOT NULL,
-  license_data BLOB NOT NULL,
+  id BIGSERIAL PRIMARY KEY,
+  license_id BYTEA NOT NULL,
+  license_data BYTEA NOT NULL,
   hostname TEXT NOT NULL,
-  first_seen INTEGER NOT NULL DEFAULT (unixepoch()),
+  first_seen TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (license_id, license_data, hostname)
 );
 CREATE TABLE IF NOT EXISTS files (
-  id INTEGER PRIMARY KEY,
-  checksum BLOB NOT NULL UNIQUE
+  id BIGSERIAL PRIMARY KEY,
+  checksum BYTEA NOT NULL UNIQUE
 );
 CREATE TABLE IF NOT EXISTS databases (
-  id INTEGER PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   file_path TEXT NOT NULL,
   idb_path TEXT NOT NULL,
-  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  file_id BIGINT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (file_id, user_id, idb_path)
 );
 CREATE TABLE IF NOT EXISTS functions (
-  id INTEGER PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL,
   length INTEGER NOT NULL,
-  database_id INTEGER NOT NULL REFERENCES databases(id) ON DELETE CASCADE,
-  checksum BLOB NOT NULL,
-  metadata BLOB NOT NULL,
+  database_id BIGINT NOT NULL REFERENCES databases(id) ON DELETE CASCADE,
+  checksum BYTEA NOT NULL,
+  metadata BYTEA NOT NULL,
   score INTEGER NOT NULL DEFAULT 0,
-  pushed_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  pushed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (checksum, database_id)
 );
 CREATE INDEX IF NOT EXISTS idx_functions_best ON functions(checksum, score DESC, updated_at DESC);
@@ -150,7 +138,7 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		dest *int64
 		sql  string
 	}{
-		{&out.Functions, "SELECT COUNT(DISTINCT hex(checksum)) FROM functions"},
+		{&out.Functions, "SELECT COUNT(DISTINCT checksum) FROM functions"},
 		{&out.Versions, "SELECT COUNT(*) FROM functions"},
 		{&out.Files, "SELECT COUNT(*) FROM files"},
 		{&out.Users, "SELECT COUNT(*) FROM users"},
@@ -169,7 +157,7 @@ func (s *Store) Pull(ctx context.Context, hashes [][]byte) ([]*protocol.PullResu
 SELECT f.name, f.length, f.metadata,
        (SELECT COUNT(*) FROM functions p WHERE p.checksum = f.checksum)
 FROM functions f
-WHERE f.checksum = ?
+WHERE f.checksum = $1
 ORDER BY f.score DESC, f.updated_at DESC, f.id DESC
 LIMIT 1`
 	stmt, err := s.db.PrepareContext(ctx, query)
@@ -192,27 +180,33 @@ LIMIT 1`
 }
 
 func (s *Store) Push(ctx context.Context, identity PushIdentity, request protocol.PushMetadata) ([]uint32, error) {
+	if identity.LicenseNumber == nil {
+		identity.LicenseNumber = []byte{}
+	}
+	if identity.LicenseData == nil {
+		identity.LicenseData = []byte{}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 	userID, err := upsertID(ctx, tx, `
-INSERT INTO users (license_id, license_data, hostname) VALUES (?, ?, ?)
+INSERT INTO users (license_id, license_data, hostname) VALUES ($1, $2, $3)
 ON CONFLICT (license_id, license_data, hostname) DO UPDATE SET hostname=excluded.hostname
 RETURNING id`, identity.LicenseNumber, identity.LicenseData, identity.Hostname)
 	if err != nil {
 		return nil, err
 	}
 	fileID, err := upsertID(ctx, tx, `
-INSERT INTO files (checksum) VALUES (?)
+INSERT INTO files (checksum) VALUES ($1)
 ON CONFLICT (checksum) DO UPDATE SET checksum=excluded.checksum
 RETURNING id`, request.MD5[:])
 	if err != nil {
 		return nil, err
 	}
 	databaseID, err := upsertID(ctx, tx, `
-INSERT INTO databases (file_path, idb_path, file_id, user_id) VALUES (?, ?, ?, ?)
+INSERT INTO databases (file_path, idb_path, file_id, user_id) VALUES ($1, $2, $3, $4)
 ON CONFLICT (file_id, user_id, idb_path) DO UPDATE SET file_path=excluded.file_path
 RETURNING id`, request.FilePath, request.IDBPath, fileID, userID)
 	if err != nil {
@@ -224,25 +218,25 @@ RETURNING id`, request.FilePath, request.IDBPath, fileID, userID)
 		if f.Metadata == nil {
 			f.Metadata = []byte{}
 		}
-		var exists int
+		var exists bool
 		err := tx.QueryRowContext(ctx,
-			"SELECT EXISTS(SELECT 1 FROM functions WHERE checksum=? AND database_id=?)",
+			"SELECT EXISTS(SELECT 1 FROM functions WHERE checksum=$1 AND database_id=$2)",
 			f.Hash, databaseID).Scan(&exists)
 		if err != nil {
 			return nil, err
 		}
-		if exists == 0 {
+		if !exists {
 			status[i] = 1
 		}
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO functions (name, length, database_id, checksum, metadata, score)
-VALUES (?, ?, ?, ?, ?, ?)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (checksum, database_id) DO UPDATE SET
   name=excluded.name,
   length=excluded.length,
   metadata=excluded.metadata,
   score=excluded.score,
-  updated_at=unixepoch()`,
+  updated_at=CURRENT_TIMESTAMP`,
 			f.Name, f.Length, databaseID, f.Hash, f.Metadata, metadata.Score(f.Metadata))
 		if err != nil {
 			return nil, err
@@ -271,7 +265,7 @@ func (s *Store) DeleteHashes(ctx context.Context, hashes [][]byte) (int64, error
 	defer tx.Rollback()
 	var deleted int64
 	for _, hash := range hashes {
-		res, err := tx.ExecContext(ctx, "DELETE FROM functions WHERE checksum=?", hash)
+		res, err := tx.ExecContext(ctx, "DELETE FROM functions WHERE checksum=$1", hash)
 		if err != nil {
 			return 0, err
 		}
@@ -281,11 +275,15 @@ func (s *Store) DeleteHashes(ctx context.Context, hashes [][]byte) (int64, error
 		}
 		deleted += n
 	}
-	if _, err := tx.ExecContext(ctx, `
-DELETE FROM databases WHERE NOT EXISTS (SELECT 1 FROM functions WHERE database_id=databases.id);
-DELETE FROM files WHERE NOT EXISTS (SELECT 1 FROM databases WHERE file_id=files.id);
-DELETE FROM users WHERE NOT EXISTS (SELECT 1 FROM databases WHERE user_id=users.id);`); err != nil {
-		return 0, err
+	cleanup := []string{
+		"DELETE FROM databases WHERE NOT EXISTS (SELECT 1 FROM functions WHERE database_id=databases.id)",
+		"DELETE FROM files WHERE NOT EXISTS (SELECT 1 FROM databases WHERE file_id=files.id)",
+		"DELETE FROM users WHERE NOT EXISTS (SELECT 1 FROM databases WHERE user_id=users.id)",
+	}
+	for _, query := range cleanup {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -295,9 +293,9 @@ DELETE FROM users WHERE NOT EXISTS (SELECT 1 FROM databases WHERE user_id=users.
 
 func (s *Store) Histories(ctx context.Context, hash []byte, limit uint32) ([]protocol.FunctionHistory, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT name, metadata, updated_at
-FROM functions WHERE checksum=?
-ORDER BY updated_at DESC, id DESC LIMIT ?`, hash, limit)
+SELECT name, metadata, EXTRACT(EPOCH FROM updated_at)::BIGINT
+FROM functions WHERE checksum=$1
+ORDER BY updated_at DESC, id DESC LIMIT $2`, hash, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -327,12 +325,11 @@ WITH ranked AS (
          ROW_NUMBER() OVER (PARTITION BY checksum ORDER BY score DESC, updated_at DESC, id DESC) AS rank_no
   FROM functions f
 )
-SELECT hex(checksum), name, length, score, popularity,
-       strftime('%Y-%m-%dT%H:%M:%SZ', updated_at, 'unixepoch')
+SELECT encode(checksum, 'hex'), name, length, score, popularity, updated_at
 FROM ranked
-WHERE rank_no=1 AND (lower(name) LIKE ? OR lower(hex(checksum)) LIKE ?)
+WHERE rank_no=1 AND (lower(name) LIKE $1 OR encode(checksum, 'hex') LIKE $2)
 ORDER BY updated_at DESC, name
-LIMIT ? OFFSET ?`, needle, needle, limit, offset)
+LIMIT $3 OFFSET $4`, needle, needle, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -340,9 +337,11 @@ LIMIT ? OFFSET ?`, needle, needle, limit, offset)
 	var out []FunctionSummary
 	for rows.Next() {
 		var f FunctionSummary
-		if err := rows.Scan(&f.Hash, &f.Name, &f.Length, &f.Score, &f.Popularity, &f.UpdatedAt); err != nil {
+		var updated time.Time
+		if err := rows.Scan(&f.Hash, &f.Name, &f.Length, &f.Score, &f.Popularity, &updated); err != nil {
 			return nil, err
 		}
+		f.UpdatedAt = formatTime(updated)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -354,15 +353,14 @@ func (s *Store) Function(ctx context.Context, hash string) ([]FunctionVersion, e
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT fn.id, hex(fn.checksum), fn.name, fn.length, fn.score, fn.metadata,
-       hex(fi.checksum), db.file_path, db.idb_path, u.hostname,
-       strftime('%Y-%m-%dT%H:%M:%SZ', fn.pushed_at, 'unixepoch'),
-       strftime('%Y-%m-%dT%H:%M:%SZ', fn.updated_at, 'unixepoch')
+SELECT fn.id, encode(fn.checksum, 'hex'), fn.name, fn.length, fn.score, fn.metadata,
+       encode(fi.checksum, 'hex'), db.file_path, db.idb_path, u.hostname,
+       fn.pushed_at, fn.updated_at
 FROM functions fn
 JOIN databases db ON db.id=fn.database_id
 JOIN files fi ON fi.id=db.file_id
 JOIN users u ON u.id=db.user_id
-WHERE fn.checksum=?
+WHERE fn.checksum=$1
 ORDER BY fn.score DESC, fn.updated_at DESC, fn.id DESC`, raw)
 	if err != nil {
 		return nil, err
@@ -372,12 +370,15 @@ ORDER BY fn.score DESC, fn.updated_at DESC, fn.id DESC`, raw)
 	for rows.Next() {
 		var f FunctionVersion
 		var md []byte
+		var pushedAt, updatedAt time.Time
 		if err := rows.Scan(&f.ID, &f.Hash, &f.Name, &f.Length, &f.Score, &md,
-			&f.FileMD5, &f.FilePath, &f.IDBPath, &f.Hostname, &f.PushedAt, &f.UpdatedAt); err != nil {
+			&f.FileMD5, &f.FilePath, &f.IDBPath, &f.Hostname, &pushedAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		f.Metadata = hex.EncodeToString(md)
 		f.Comments = metadata.ParseBestEffort(md)
+		f.PushedAt = formatTime(pushedAt)
+		f.UpdatedAt = formatTime(updatedAt)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -392,15 +393,15 @@ func (s *Store) ListFiles(ctx context.Context, search string, limit, offset int)
 	}
 	needle := "%" + strings.ToLower(search) + "%"
 	rows, err := s.db.QueryContext(ctx, `
-SELECT hex(fi.checksum), COALESCE(MAX(db.file_path), ''), COUNT(DISTINCT fn.checksum),
-       COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', MAX(fn.updated_at), 'unixepoch'), '')
+SELECT encode(fi.checksum, 'hex'), COALESCE(MAX(db.file_path), ''), COUNT(DISTINCT fn.checksum),
+       MAX(fn.updated_at)
 FROM files fi
 LEFT JOIN databases db ON db.file_id=fi.id
 LEFT JOIN functions fn ON fn.database_id=db.id
-WHERE lower(hex(fi.checksum)) LIKE ? OR lower(db.file_path) LIKE ?
+WHERE encode(fi.checksum, 'hex') LIKE $1 OR lower(db.file_path) LIKE $2
 GROUP BY fi.id
 ORDER BY MAX(fn.updated_at) DESC
-LIMIT ? OFFSET ?`, needle, needle, limit, offset)
+LIMIT $3 OFFSET $4`, needle, needle, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -408,8 +409,12 @@ LIMIT ? OFFSET ?`, needle, needle, limit, offset)
 	var out []FileSummary
 	for rows.Next() {
 		var f FileSummary
-		if err := rows.Scan(&f.MD5, &f.Path, &f.Functions, &f.UpdatedAt); err != nil {
+		var updated sql.NullTime
+		if err := rows.Scan(&f.MD5, &f.Path, &f.Functions, &updated); err != nil {
 			return nil, err
+		}
+		if updated.Valid {
+			f.UpdatedAt = formatTime(updated.Time)
 		}
 		out = append(out, f)
 	}
@@ -422,13 +427,13 @@ func (s *Store) FileFunctions(ctx context.Context, md5 string) ([]FunctionSummar
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT hex(fn.checksum), fn.name, fn.length, fn.score,
+SELECT encode(fn.checksum, 'hex'), fn.name, fn.length, fn.score,
        (SELECT COUNT(*) FROM functions p WHERE p.checksum=fn.checksum),
-       strftime('%Y-%m-%dT%H:%M:%SZ', fn.updated_at, 'unixepoch')
+       fn.updated_at
 FROM functions fn
 JOIN databases db ON db.id=fn.database_id
 JOIN files fi ON fi.id=db.file_id
-WHERE fi.checksum=?
+WHERE fi.checksum=$1
 ORDER BY fn.updated_at DESC LIMIT 10000`, raw)
 	if err != nil {
 		return nil, err
@@ -437,9 +442,11 @@ ORDER BY fn.updated_at DESC LIMIT 10000`, raw)
 	var out []FunctionSummary
 	for rows.Next() {
 		var f FunctionSummary
-		if err := rows.Scan(&f.Hash, &f.Name, &f.Length, &f.Score, &f.Popularity, &f.UpdatedAt); err != nil {
+		var updated time.Time
+		if err := rows.Scan(&f.Hash, &f.Name, &f.Length, &f.Score, &f.Popularity, &updated); err != nil {
 			return nil, err
 		}
+		f.UpdatedAt = formatTime(updated)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -451,12 +458,12 @@ func (s *Store) FilesWithFunction(ctx context.Context, hash string) ([]string, e
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT DISTINCT hex(fi.checksum)
+SELECT DISTINCT encode(fi.checksum, 'hex')
 FROM files fi
 JOIN databases db ON db.file_id=fi.id
 JOIN functions fn ON fn.database_id=db.id
-WHERE fn.checksum=?
-ORDER BY hex(fi.checksum)`, raw)
+WHERE fn.checksum=$1
+ORDER BY encode(fi.checksum, 'hex')`, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -482,4 +489,8 @@ func parseHash(value string) ([]byte, error) {
 		return nil, fmt.Errorf("invalid hexadecimal hash: %w", err)
 	}
 	return raw, nil
+}
+
+func formatTime(value time.Time) string {
+	return value.UTC().Format(time.RFC3339)
 }
