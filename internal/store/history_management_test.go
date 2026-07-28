@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -161,6 +162,30 @@ func TestHistoryDiffFieldSelection(t *testing.T) {
 	fields := diffChanges(&base, commentsChanged)
 	if len(fields) != 1 || fields[0].Field != "comments" {
 		t.Fatalf("comment diff = %#v", fields)
+	}
+
+	var before, after protocol.Encoder
+	before.DD(metadata.KeyFunctionComment)
+	before.Bytes([]byte("before"))
+	after.DD(metadata.KeyFunctionComment)
+	after.Bytes([]byte("after"))
+	metadataChanged := base
+	metadataChanged.Metadata = hex.EncodeToString(after.Payload())
+	base.Metadata = hex.EncodeToString(before.Payload())
+	fields = diffChanges(&base, metadataChanged)
+	var raw, semantic bool
+	for _, field := range fields {
+		raw = raw || field.Field == "metadata.raw"
+		semantic = semantic || field.Field == "metadata.function_comment" &&
+			field.Before == "before" && field.After == "after"
+	}
+	if !raw || !semantic {
+		t.Fatalf("semantic metadata diff = %#v", fields)
+	}
+
+	initial := diffChanges(nil, metadataChanged)
+	if len(initial) < 6 || initial[3].Field != "metadata.raw" {
+		t.Fatalf("initial metadata diff = %#v", initial)
 	}
 }
 

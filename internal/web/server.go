@@ -18,6 +18,7 @@ import (
 
 	authn "github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
+	"github.com/segfaultd/lux/internal/metadata"
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/store"
 )
@@ -53,6 +54,8 @@ func New(cfg config.Config, store *store.Store, metrics *observability.Metrics, 
 	mux.HandleFunc("GET /api/v1/metadata/{id}", s.getMetadata)
 	mux.HandleFunc("PATCH /api/v1/metadata/{id}", s.updateMetadata)
 	mux.HandleFunc("DELETE /api/v1/metadata/{id}", s.deleteMetadata)
+	mux.HandleFunc("GET /api/v1/metadata/{id}/structured", s.getStructuredMetadata)
+	mux.HandleFunc("PATCH /api/v1/metadata/{id}/structured", s.updateStructuredMetadata)
 	mux.HandleFunc("GET /api/v1/pushes", s.listPushes)
 	mux.HandleFunc("GET /api/v1/pushes/{id}", s.getPush)
 	mux.HandleFunc("DELETE /api/v1/pushes/{id}", s.deletePush)
@@ -400,6 +403,79 @@ func (s *Server) getMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, version)
+}
+
+func (s *Server) getStructuredMetadata(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	version, err := s.store.FunctionVersion(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "metadata version not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, "get structured metadata", err)
+		return
+	}
+	rawMetadata, err := hex.DecodeString(version.Metadata)
+	if err != nil {
+		s.internalError(w, "decode stored metadata", err)
+		return
+	}
+	writeStructuredMetadata(w, version, rawMetadata)
+}
+
+func (s *Server) updateStructuredMetadata(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var request metadata.PatchRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	current, err := s.store.FunctionVersion(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "metadata version not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, "get metadata version for structured update", err)
+		return
+	}
+	rawMetadata, err := hex.DecodeString(current.Metadata)
+	if err != nil {
+		s.internalError(w, "decode stored metadata", err)
+		return
+	}
+	patched, err := metadata.ApplyPatch(rawMetadata, request)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	version, err := s.store.UpdateFunctionVersion(
+		r.Context(), id, current.Name, current.Length, patched)
+	if err != nil {
+		s.internalError(w, "update structured metadata", err)
+		return
+	}
+	writeStructuredMetadata(w, version, patched)
+}
+
+func writeStructuredMetadata(w http.ResponseWriter, version store.FunctionVersion, rawMetadata []byte) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":       version.ID,
+		"hash":     version.Hash,
+		"name":     version.Name,
+		"length":   version.Length,
+		"score":    version.Score,
+		"document": metadata.Inspect(rawMetadata),
+	})
 }
 
 func (s *Server) updateMetadata(w http.ResponseWriter, r *http.Request) {

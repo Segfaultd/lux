@@ -75,13 +75,14 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 		{"project invalid", "/api/v1/projects/nope", 400, []string{"positive integer"}},
 		{"project missing", "/api/v1/projects/999999", 404, []string{"project not found"}},
 		{"metadata", "/api/v1/metadata/" + strconv.FormatInt(versionID, 10), 200, []string{"known_function", `"project_id"`}},
+		{"structured metadata", "/api/v1/metadata/" + strconv.FormatInt(versionID, 10) + "/structured", 200, []string{`"key":"function_comment"`, `"text":"useful comment"`, `"known_chunks":1`}},
 		{"metadata invalid", "/api/v1/metadata/0", 400, []string{"positive integer"}},
 		{"metadata missing", "/api/v1/metadata/999999", 404, []string{"metadata version not found"}},
 		{"pushes", "/api/v1/pushes?q=sample&username=&project_id=" + strconv.FormatInt(projectID, 10), 200, []string{`"source":"native"`, `"changed_functions":1`}},
 		{"push", "/api/v1/pushes/" + strconv.FormatInt(pushes[0].ID, 10), 200, []string{`"changes"`, `"known_function"`}},
 		{"push missing", "/api/v1/pushes/999999", 404, []string{"push not found"}},
 		{"history", "/api/v1/history?q=known&hash=" + hash, 200, []string{`"operation":"create"`, `"known_function"`}},
-		{"history diff", "/api/v1/history/" + strconv.FormatInt(changes[0].ID, 10), 200, []string{`"fields"`, `"field":"name"`}},
+		{"history diff", "/api/v1/history/" + strconv.FormatInt(changes[0].ID, 10), 200, []string{`"fields"`, `"field":"name"`, `"metadata_document"`, `"metadata.function_comment"`}},
 		{"history missing", "/api/v1/history/999999", 404, []string{"history record not found"}},
 		{"history bad hash", "/api/v1/history?hash=bad", 400, []string{"exactly 32"}},
 		{"push bad project", "/api/v1/pushes?project_id=nope", 400, []string{"positive integer"}},
@@ -182,6 +183,79 @@ func TestHistoryManagementAPI(t *testing.T) {
 	versions, err := db.Function(context.Background(), hash)
 	if err != nil || len(versions) != 0 {
 		t.Fatalf("push deletion left versions %#v, %v", versions, err)
+	}
+}
+
+func TestStructuredMetadataManagementAPI(t *testing.T) {
+	db, hash, _ := populatedWebStore(t)
+	versions, err := db.Function(context.Background(), hash)
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("versions: %#v, %v", versions, err)
+	}
+	versionID := versions[0].ID
+	path := "/api/v1/metadata/" + strconv.FormatInt(versionID, 10) + "/structured"
+	server := newWebTestServer(t, config.Config{AdminToken: "secret"}, db)
+	defer server.Close()
+
+	tests := []struct {
+		name, path, body, token string
+		status                  int
+		piece                   string
+	}{
+		{"unauthorized", path, `{"mutations":[{"operation":"set","index":0,"text":"x"}]}`, "", http.StatusUnauthorized, "admin token"},
+		{"invalid id", "/api/v1/metadata/nope/structured", `{}`, "secret", http.StatusBadRequest, "positive integer"},
+		{"missing", "/api/v1/metadata/999999/structured", `{"mutations":[]}`, "secret", http.StatusNotFound, "not found"},
+		{"empty patch", path, `{"mutations":[]}`, "secret", http.StatusBadRequest, "at least one"},
+		{"invalid patch", path, `{"mutations":[{"operation":"set","index":0,"payload":"xyz"}]}`, "secret", http.StatusBadRequest, "hexadecimal"},
+		{"malformed JSON", path, `{`, "secret", http.StatusBadRequest, "valid JSON"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := accountRequest(t, server, http.MethodPatch, test.path, test.body, test.token)
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			if response.StatusCode != test.status || !strings.Contains(string(body), test.piece) {
+				t.Fatalf("status %d, want %d, body %s", response.StatusCode, test.status, body)
+			}
+		})
+	}
+
+	response := accountRequest(t, server, http.MethodPatch, path, `{
+		"mutations":[
+			{"operation":"set","index":0,"text":"structured edit"},
+			{"operation":"append","code":99,"payload":"deadbeef"}
+		]
+	}`, "secret")
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK ||
+		!strings.Contains(string(body), `"text":"structured edit"`) ||
+		!strings.Contains(string(body), `"key":"unknown_99"`) ||
+		!strings.Contains(string(body), `"payload":"deadbeef"`) {
+		t.Fatalf("structured update status %d: %s", response.StatusCode, body)
+	}
+
+	version, err := db.FunctionVersion(context.Background(), versionID)
+	if err != nil || len(version.Comments) != 1 || version.Comments[0].Text != "structured edit" {
+		t.Fatalf("stored structured update = %#v, %v", version, err)
+	}
+	history, err := db.ListHistory(context.Background(), store.HistoryFilter{}, 10, 0)
+	if err != nil || len(history) != 2 {
+		t.Fatalf("history after structured update = %#v, %v", history, err)
+	}
+	diff, err := db.FunctionChangeDiff(context.Background(), history[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundSemantic := false
+	for _, field := range diff.Fields {
+		if field.Field == "metadata.function_comment" &&
+			field.Before == "useful comment" && field.After == "structured edit" {
+			foundSemantic = true
+		}
+	}
+	if !foundSemantic {
+		t.Fatalf("semantic history diff missing: %#v", diff.Fields)
 	}
 }
 

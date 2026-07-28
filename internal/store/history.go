@@ -76,9 +76,11 @@ type FieldDiff struct {
 }
 
 type HistoryDiff struct {
-	Change   HistoryChange  `json:"change"`
-	Previous *HistoryChange `json:"previous,omitempty"`
-	Fields   []FieldDiff    `json:"fields"`
+	Change           HistoryChange      `json:"change"`
+	Previous         *HistoryChange     `json:"previous,omitempty"`
+	Metadata         metadata.Document  `json:"metadata_document"`
+	PreviousMetadata *metadata.Document `json:"previous_metadata_document,omitempty"`
+	Fields           []FieldDiff        `json:"fields"`
 }
 
 type HistoryDeleteResult struct {
@@ -204,7 +206,19 @@ ORDER BY fc.changed_at DESC, fc.id DESC LIMIT 1`, change.FunctionID, id))
 	} else if err != sql.ErrNoRows {
 		return HistoryDiff{}, err
 	}
-	return HistoryDiff{Change: change, Previous: previousPtr, Fields: diffChanges(previousPtr, change)}, nil
+	changeMetadata := inspectMetadataHex(change.Metadata)
+	var previousMetadata *metadata.Document
+	if previousPtr != nil {
+		decoded := inspectMetadataHex(previousPtr.Metadata)
+		previousMetadata = &decoded
+	}
+	return HistoryDiff{
+		Change:           change,
+		Previous:         previousPtr,
+		Metadata:         changeMetadata,
+		PreviousMetadata: previousMetadata,
+		Fields:           diffChanges(previousPtr, change),
+	}, nil
 }
 
 func (s *Store) RestoreFunctionChange(ctx context.Context, id int64) (HistoryChange, error) {
@@ -412,13 +426,17 @@ WHERE id=$5`, name, length, rawMetadata, score, functionID)
 func diffChanges(previous *HistoryChange, change HistoryChange) []FieldDiff {
 	var out []FieldDiff
 	if previous == nil {
-		return []FieldDiff{
+		out = []FieldDiff{
 			{Field: "name", After: change.Name},
 			{Field: "length", After: change.Length},
 			{Field: "score", After: change.Score},
-			{Field: "metadata", After: change.Metadata},
+			{Field: "metadata.raw", After: change.Metadata},
 			{Field: "comments", After: change.Comments},
 		}
+		for _, field := range semanticFieldsFromHex(change.Metadata) {
+			out = append(out, FieldDiff{Field: field.Field, After: field.Value})
+		}
+		return out
 	}
 	if previous.Name != change.Name {
 		out = append(out, FieldDiff{Field: "name", Before: previous.Name, After: change.Name})
@@ -430,12 +448,44 @@ func diffChanges(previous *HistoryChange, change HistoryChange) []FieldDiff {
 		out = append(out, FieldDiff{Field: "score", Before: previous.Score, After: change.Score})
 	}
 	if previous.Metadata != change.Metadata {
-		out = append(out, FieldDiff{Field: "metadata", Before: previous.Metadata, After: change.Metadata})
+		out = append(out, FieldDiff{
+			Field: "metadata.raw", Before: previous.Metadata, After: change.Metadata,
+		})
+		before, beforeErr := hex.DecodeString(previous.Metadata)
+		after, afterErr := hex.DecodeString(change.Metadata)
+		if beforeErr == nil && afterErr == nil {
+			for _, difference := range metadata.SemanticDiff(before, after) {
+				out = append(out, FieldDiff{
+					Field:  difference.Field,
+					Before: difference.Before,
+					After:  difference.After,
+				})
+			}
+		}
 	}
 	if !reflect.DeepEqual(previous.Comments, change.Comments) {
 		out = append(out, FieldDiff{Field: "comments", Before: previous.Comments, After: change.Comments})
 	}
 	return out
+}
+
+func inspectMetadataHex(value string) metadata.Document {
+	raw, err := hex.DecodeString(value)
+	if err != nil {
+		return metadata.Document{Error: err.Error()}
+	}
+	return metadata.Inspect(raw)
+}
+
+func semanticFieldsFromHex(value string) []metadata.SemanticField {
+	raw, err := hex.DecodeString(value)
+	if err != nil {
+		return []metadata.SemanticField{{
+			Field: "metadata.parse_error",
+			Value: map[string]any{"error": err.Error()},
+		}}
+	}
+	return metadata.SemanticFields(raw)
 }
 
 func normalizePagination(limit, offset int) (int, int) {
