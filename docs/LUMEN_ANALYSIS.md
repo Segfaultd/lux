@@ -1,4 +1,9 @@
-# Lumen analysis and Lux compatibility map
+# Legacy Lumen analysis
+
+> Historical note: this document records the initial reverse-engineering input
+> used to bootstrap Lux. It is not the Lux product specification. Current
+> behavior is defined by [`OFFICIAL_LUMINA_PARITY.md`](OFFICIAL_LUMINA_PARITY.md)
+> and the official Hex-Rays references linked there.
 
 This document records the source-level analysis used to implement Lux. The analyzed sibling revision was `642fa35` (`update deps, fix clippy lints`).
 

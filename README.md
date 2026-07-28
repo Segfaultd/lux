@@ -2,18 +2,18 @@
 
 Lux is a compact, private [IDA Lumina](https://hex-rays.com/products/ida/lumina/) server written in Go. It speaks the Lumina RPC protocol used by IDA 7.2 and later, stores function metadata in PostgreSQL, and serves its management console from the same executable.
 
-Lux was independently implemented from the protocol behavior in the sibling `lumen` source tree. It does not depend on Lumen at build or run time. The detailed source analysis and compatibility map are in [`docs/LUMEN_ANALYSIS.md`](docs/LUMEN_ANALYSIS.md).
+Lux targets the behavior exposed by native IDA clients and the official Lumina SDK and administration documentation. The compatibility matrix and normative references are in [`docs/OFFICIAL_LUMINA_PARITY.md`](docs/OFFICIAL_LUMINA_PARITY.md). The original Lumen investigation remains only as historical implementation research in [`docs/LUMEN_ANALYSIS.md`](docs/LUMEN_ANALYSIS.md).
 
 ## What it supports
 
 - Lumina wire formats 0 through 5 and newer; authenticated operation requires credential-capable protocol version 3+
 - IDA hello/login, metadata pull, metadata push, delete history, and function history RPCs
-- Lumen-compatible best-metadata scoring and selection
+- Official higher-quality metadata replacement and deterministic pull selection
 - Immutable push and per-function revision history with native IDA history responses
 - PostgreSQL persistence with connection pooling, foreign keys, and automatic schema creation
 - Optional TLS with a PEM certificate and key
 - Embedded administration console for role-based accounts, live sessions, IDB projects, pushes, semantic revision diffs, files, functions, structured/raw metadata versions, restore, and protected deletion
-- JSON management API, Lumen-compatible read-only HTTP routes, health check, and Prometheus metrics
+- JSON management API, optional legacy read-only HTTP aliases, health check, and Prometheus metrics
 - One static, CGO-free binary and a small scratch-based container image
 
 ## Quick start
@@ -132,7 +132,7 @@ Deletion must be enabled with `LUX_ALLOW_DELETES=true`. Account management alway
 
 Push and history searches accept `q`, `username`, `project_id`, `from`, and `to`. History additionally accepts `hash` and `push_id`. Timestamps use RFC3339. Native pushes are recorded even when they contain no changed functions; only actual metadata changes create revisions. Restoring a revision creates a new auditable revision instead of rewriting history.
 
-Compatibility aliases are available at `GET /api/files/{md5}` and `GET /api/funcs/{hash}`.
+Legacy compatibility aliases are available at `GET /api/files/{md5}` and `GET /api/funcs/{hash}`. They are Lux extensions and are not part of the native Lumina protocol.
 
 The management listener serves plain HTTP. Bind it to localhost or put it behind an HTTPS reverse proxy when it is reachable over an untrusted network; bearer tokens should never travel over unencrypted public connections.
 
@@ -166,16 +166,16 @@ The structured patch endpoint accepts ordered mutations. `set` and `remove` requ
 
 Structured edits create the same immutable administrative push/revision records as raw edits. History detail responses contain both decoded documents and field-level semantic differences such as `metadata.function_comment`.
 
-## Design notes from Lumen
+## Native protocol design
 
-The sibling Lumen project has four important layers:
+A TCP/TLS listener performs a credential-bearing hello exchange and then
+handles a stream of request/response transactions. Packets use a four-byte
+big-endian payload length, one message-code byte, and IDA's compact positional
+encoding. PostgreSQL stores users, input files, IDBs, pushes, current function
+metadata, and immutable history.
 
-1. A TCP/TLS listener performs a hello exchange, then handles a stream of request/response transactions.
-2. Packets use a four-byte big-endian payload length, one message-code byte, and a positional compact encoding. Integers are variable-width; strings are NUL-terminated; byte arrays and sequences carry packed lengths.
-3. PostgreSQL records identities, input files, IDA databases, and function metadata versions. Pull chooses the highest-scoring metadata for each 128-bit function hash.
-4. A separate Warp server exposes a small read-only HTTP API and Prometheus metrics.
-
-Lux preserves the behavior that matters to IDA while changing the application stack: a standard-library Go server and embedded management UI replace the Rust async stack and separate minimal web page. PostgreSQL remains the durable store. Function versions stay isolated by contributor/database rather than being merged. Pulls deterministically choose score, update time, then row ID.
+Native behavior follows the official compatibility matrix. Management features
+that do not exist in the IDA protocol remain isolated HTTP extensions.
 
 ## Development
 
