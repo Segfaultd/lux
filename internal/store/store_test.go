@@ -135,7 +135,8 @@ func TestPullFrequencyAndSeenFileFlag(t *testing.T) {
 	hash := bytes.Repeat([]byte{0x91}, 16)
 	request := protocol.PushMetadata{
 		IDBPath: "frequency.i64", FilePath: "frequency.bin",
-		Funcs: []protocol.PushFunction{{Name: "popular", Hash: hash}},
+		Funcs:     []protocol.PushFunction{{Name: "popular", Hash: hash}},
+		Addresses: []uint64{0x401000},
 	}
 	if _, err := s.Push(ctx, PushIdentity{Hostname: "frequency-host"}, request); err != nil {
 		t.Fatal(err)
@@ -154,6 +155,23 @@ func TestPullFrequencyAndSeenFileFlag(t *testing.T) {
 	assertFrequency(0, 1)
 	assertFrequency(0, 2)
 	assertFrequency(protocol.PullSeenFile, 2)
+	popular, err := s.PopularFunctions(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(popular) != 1 || popular[0].Name != "popular" ||
+		popular[0].Frequency != 2 || popular[0].Address != 0x401000 ||
+		!bytes.Equal(popular[0].Pattern, hash) || popular[0].PatternType != 1 ||
+		popular[0].Hostname != "frequency-host" ||
+		popular[0].FilePath != "frequency.bin" {
+		t.Fatalf("popular functions %#v", popular)
+	}
+	if defaults, err := s.PopularFunctions(ctx, 0); err != nil || len(defaults) != 1 {
+		t.Fatalf("default popular-functions limit: %#v, %v", defaults, err)
+	}
+	if capped, err := s.PopularFunctions(ctx, 1001); err != nil || len(capped) != 1 {
+		t.Fatalf("capped popular-functions limit: %#v, %v", capped, err)
+	}
 }
 
 func TestOfficialPushReplacementModes(t *testing.T) {

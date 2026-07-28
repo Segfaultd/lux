@@ -19,7 +19,7 @@ is not a behavioral specification for Lux.
 
 | Official behavior | Lux status |
 |---|---|
-| Credential-bearing hello and user profile response | Implemented for native IDA protocol versions 3+ |
+| Credential-bearing hello and full user profile response | Implemented for native IDA protocol versions 3+ |
 | Metadata pull and per-function result codes | Implemented |
 | Metadata push and per-function result codes | Implemented |
 | Replace current metadata only when the submitted metadata is better | Implemented |
@@ -29,8 +29,8 @@ is not a behavioral specification for Lux.
 | Immutable push and accepted-change history | Implemented |
 | Function-history retrieval and deletion | Implemented |
 | Pull frequency and `PULL_MD_SEEN_FILE` behavior | Implemented |
-| Popular-functions RPC (`PKT_GET_POP`) | Planned |
-| Server-information RPC (`PKT_GET_LUMINA_INFO`) | Planned |
+| Popular-functions RPC (`PKT_GET_POP`) | Implemented |
+| Server-information RPC (`PKT_GET_LUMINA_INFO`) | Implemented |
 | Regular users plus `UF_IS_ADMIN` and `UF_CAN_DEL_HISTORY` flags | Implemented |
 | `lc info`, users, statistics, history, and session administration behavior | Exposed through the management API and console |
 | Wire-compatible `lc` administration protocol | Not yet implemented |

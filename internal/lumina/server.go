@@ -21,18 +21,19 @@ import (
 )
 
 type Server struct {
-	cfg      config.Config
-	store    *store.Store
-	auth     *auth.Service
-	metrics  *observability.Metrics
-	sessions *session.Registry
-	log      *slog.Logger
+	cfg       config.Config
+	store     *store.Store
+	auth      *auth.Service
+	metrics   *observability.Metrics
+	sessions  *session.Registry
+	startedAt time.Time
+	log       *slog.Logger
 }
 
 func New(cfg config.Config, store *store.Store, metrics *observability.Metrics, log *slog.Logger) *Server {
 	return &Server{
 		cfg: cfg, store: store, auth: auth.New(store), metrics: metrics,
-		sessions: session.NewRegistry(), log: log,
+		sessions: session.NewRegistry(), startedAt: time.Now().UTC(), log: log,
 	}
 }
 
@@ -136,11 +137,11 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			return
 		}
 	} else {
-		var features uint32
-		if s.cfg.AllowDeletes && principal.Can(access.CapabilityDeleteHistory) {
-			features |= 0x02
-		}
-		if err := protocol.WritePacket(conn, protocol.CodeHelloResult, protocol.EncodeHelloResult(features)); err != nil {
+		if err := protocol.WritePacket(
+			conn,
+			protocol.CodeHelloResult,
+			protocol.EncodeHelloResult(s.protocolUser(principal)),
+		); err != nil {
 			return
 		}
 	}
@@ -257,6 +258,41 @@ func (s *Server) handlePacket(
 		}
 		return s.write(conn, protocol.CodePushMetadataResult, protocol.EncodePushResult(status))
 
+	case protocol.CodeGetPopular:
+		nresults, err := protocol.DecodeGetPopular(packet.Payload)
+		if err != nil {
+			return s.failSession(conn, sessionID, 0, s.cfg.ServerName+": invalid popular-functions request.")
+		}
+		ctx, cancel := context.WithTimeout(parent, s.cfg.PullWait)
+		functions, err := s.store.PopularFunctions(ctx, nresults)
+		cancel()
+		if err != nil {
+			s.log.Error("get popular functions", "error", err)
+			return s.failSession(conn, sessionID, 3, s.cfg.ServerName+": database error; try again later.")
+		}
+		return s.write(
+			conn, protocol.CodeGetPopularResult, protocol.EncodePopularResult(functions))
+
+	case protocol.CodeGetLuminaInfo:
+		if len(packet.Payload) != 0 {
+			return s.failSession(conn, sessionID, 0, s.cfg.ServerName+": invalid server-information request.")
+		}
+		current, err := s.sessions.Get(sessionID)
+		if err != nil {
+			return s.failSession(conn, sessionID, 3, s.cfg.ServerName+": session state unavailable.")
+		}
+		info := protocol.LuminaConnectionInfo{
+			SessionID:     uint32(current.ID),
+			PeerName:      current.RemoteAddress,
+			User:          s.protocolUser(principal),
+			Established:   uint64(current.ConnectedAt.Unix()),
+			ServerVersion: "lux",
+			ServerStarted: uint64(s.startedAt.Unix()),
+			ServerTime:    uint64(time.Now().UTC().Unix()),
+		}
+		return s.write(
+			conn, protocol.CodeGetLuminaInfoResult, protocol.EncodeLuminaInfoResult(info))
+
 	case protocol.CodeDeleteHistory:
 		if !s.cfg.AllowDeletes {
 			return s.failSession(conn, sessionID, 2, s.cfg.ServerName+": delete command is disabled.")
@@ -306,6 +342,20 @@ func (s *Server) handlePacket(
 	}
 }
 
+func (s *Server) protocolUser(principal auth.Principal) protocol.LuminaUser {
+	var features uint32
+	if principal.IsAdmin {
+		features |= protocol.UserIsAdmin
+	}
+	if s.cfg.AllowDeletes && principal.Can(access.CapabilityDeleteHistory) {
+		features |= protocol.UserCanDeleteHistory
+	}
+	return protocol.LuminaUser{
+		LicenseID: principal.LicenseID, LicenseName: principal.Username,
+		Email: principal.Email, Username: principal.Username, Features: features,
+	}
+}
+
 func (s *Server) write(conn net.Conn, code byte, payload []byte) bool {
 	if err := protocol.WritePacket(conn, code, payload); err != nil {
 		s.log.Debug("writing Lumina response", "error", err)
@@ -330,6 +380,10 @@ func operationName(code byte) string {
 		return "pull_metadata"
 	case protocol.CodePushMetadata:
 		return "push_metadata"
+	case protocol.CodeGetPopular:
+		return "get_popular_functions"
+	case protocol.CodeGetLuminaInfo:
+		return "get_lumina_info"
 	case protocol.CodeDeleteHistory:
 		return "delete_history"
 	case protocol.CodeGetFuncHistories:

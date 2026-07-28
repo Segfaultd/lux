@@ -337,6 +337,106 @@ func TestOfficialUserCapabilitiesAreEnforced(t *testing.T) {
 	waitConnection(t, adminDone)
 }
 
+func TestOfficialPopularFunctionsAndServerInfoRPCs(t *testing.T) {
+	db, hash := populatedLuminaStore(t)
+	if err := auth.New(db).Bootstrap(context.Background(), "guest", "guest password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Pull(context.Background(), [][]byte{hash}); err != nil {
+		t.Fatal(err)
+	}
+	server := testServerWithStore(t, config.Config{
+		ServerName: "unit", Password: "guest password", AllowDeletes: true,
+		HelloWait: time.Second, CommandWait: time.Second, PullWait: time.Second,
+	}, db)
+	conn, done := startDirectConnection(server)
+	sendHello(t, conn, 5, &protocol.Credentials{Username: "guest", Password: "guest password"})
+	hello := readPacket(t, conn)
+	if hello.Code != protocol.CodeHelloResult {
+		t.Fatalf("hello response %#x", hello.Code)
+	}
+	helloDecoder := protocol.NewDecoder(hello.Payload)
+	licenseID, _ := helloDecoder.CString()
+	licenseName, _ := helloDecoder.CString()
+	email, _ := helloDecoder.CString()
+	username, _ := helloDecoder.CString()
+	_, _ = helloDecoder.DD()
+	_, _ = helloDecoder.DQ()
+	features, _ := helloDecoder.DD()
+	if licenseID != "" || licenseName != "guest" || email != "" ||
+		username != "guest" ||
+		features != protocol.UserIsAdmin|protocol.UserCanDeleteHistory {
+		t.Fatalf("hello user profile %q %q %q %q %#x",
+			licenseID, licenseName, email, username, features)
+	}
+
+	var popularRequest protocol.Encoder
+	popularRequest.DD(1)
+	if err := protocol.WritePacket(
+		conn, protocol.CodeGetPopular, popularRequest.Payload(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	popular := readPacket(t, conn)
+	if popular.Code != protocol.CodeGetPopularResult {
+		t.Fatalf("popular response %#x", popular.Code)
+	}
+	decoder := protocol.NewDecoder(popular.Payload)
+	count, _ := decoder.DD()
+	name, _ := decoder.CString()
+	length, _ := decoder.DD()
+	_, _ = decoder.Bytes()
+	patternType, _ := decoder.DD()
+	pattern, _ := decoder.Bytes()
+	frequency, _ := decoder.DD()
+	hostname, _ := decoder.CString()
+	filePath, _ := decoder.CString()
+	_, _ = decoder.Fixed(16)
+	address, _ := decoder.DQ()
+	if count != 1 || name != "known" || length != 12 || patternType != 1 ||
+		!bytes.Equal(pattern, hash) || frequency != 1 || hostname != "host" ||
+		filePath != "sample.bin" || address != 0x401000 || decoder.Remaining() != 0 {
+		t.Fatalf("popular result count=%d name=%q frequency=%d address=%#x",
+			count, name, frequency, address)
+	}
+
+	if err := protocol.WritePacket(conn, protocol.CodeGetLuminaInfo, nil); err != nil {
+		t.Fatal(err)
+	}
+	info := readPacket(t, conn)
+	if info.Code != protocol.CodeGetLuminaInfoResult {
+		t.Fatalf("info response %#x", info.Code)
+	}
+	decoder = protocol.NewDecoder(info.Payload)
+	sessionID, _ := decoder.DD()
+	peerName, _ := decoder.CString()
+	for range 3 {
+		_, _ = decoder.CString()
+	}
+	infoUsername, _ := decoder.CString()
+	_, _ = decoder.DD()
+	_, _ = decoder.DQ()
+	infoFeatures, _ := decoder.DD()
+	established, _ := decoder.DQ()
+	_, _ = decoder.CString()
+	version, _ := decoder.CString()
+	started, _ := decoder.DQ()
+	current, _ := decoder.DQ()
+	if sessionID == 0 || peerName == "" || infoUsername != "guest" ||
+		infoFeatures != features || established == 0 || version != "lux" ||
+		started == 0 || current < started || decoder.Remaining() != 0 {
+		t.Fatalf("server info session=%d peer=%q user=%q version=%q times=%d/%d",
+			sessionID, peerName, infoUsername, version, started, current)
+	}
+
+	if err := protocol.WritePacket(conn, protocol.CodeGetLuminaInfo, []byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	assertFailure(t, readPacket(t, conn), 0, "invalid server-information")
+	conn.Close()
+	waitConnection(t, done)
+}
+
 func TestMalformedAndUnsupportedCommands(t *testing.T) {
 	server := newLuminaTestServer(t, config.Config{
 		ServerName: "unit", Username: "guest", HistoryLimit: 10, HelloWait: time.Second, CommandWait: time.Second,
@@ -356,6 +456,8 @@ func TestMalformedAndUnsupportedCommands(t *testing.T) {
 		{"unknown command", 0x7e, []byte{1}, "invalid command"},
 		{"malformed pull", protocol.CodePullMetadata, nil, "invalid pull"},
 		{"malformed push", protocol.CodePushMetadata, nil, "invalid push"},
+		{"malformed popular", protocol.CodeGetPopular, nil, "invalid popular-functions"},
+		{"malformed info", protocol.CodeGetLuminaInfo, []byte{1}, "invalid server-information"},
 		{"malformed delete", protocol.CodeDeleteHistory, nil, "delete command is disabled"},
 		{"malformed histories", protocol.CodeGetFuncHistories, nil, "invalid history"},
 	}
@@ -838,6 +940,7 @@ func populatedLuminaStore(t *testing.T) (*store.Store, []byte) {
 		Funcs: []protocol.PushFunction{{
 			Name: "known", Length: 12, Hash: hash, Metadata: append([]byte(nil), md.Payload()...),
 		}},
+		Addresses: []uint64{0x401000},
 	})
 	if err != nil {
 		t.Fatal(err)

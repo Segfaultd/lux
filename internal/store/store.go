@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -201,10 +202,12 @@ CREATE TABLE IF NOT EXISTS functions (
   checksum BYTEA NOT NULL,
   metadata BYTEA NOT NULL,
   score INTEGER NOT NULL DEFAULT 0,
+  ea64 NUMERIC(20, 0) NOT NULL DEFAULT 18446744073709551615,
   pushed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (checksum, database_id)
 );
+ALTER TABLE functions ADD COLUMN IF NOT EXISTS ea64 NUMERIC(20, 0) NOT NULL DEFAULT 18446744073709551615;
 CREATE INDEX IF NOT EXISTS idx_functions_best ON functions(checksum, score DESC, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_functions_database ON functions(database_id);
 CREATE TABLE IF NOT EXISTS function_frequencies (
@@ -469,20 +472,37 @@ LIMIT 1`, f.Hash).Scan(&currentAcceptedScore)
 		if !hasCurrent {
 			status[i] = 1
 		}
+		address := uint64(math.MaxUint64)
+		hasAddress := i < len(request.Addresses)
+		if hasAddress {
+			address = request.Addresses[i]
+		}
+		addressText := strconv.FormatUint(address, 10)
 		var functionID int64
 		var currentName string
 		var currentLength uint32
 		var currentMetadata []byte
+		var currentAddress string
 		err := tx.QueryRowContext(ctx, `
-SELECT id, name, length, metadata
+SELECT id, name, length, metadata, ea64::text
 FROM functions WHERE checksum=$1 AND database_id=$2`, f.Hash, databaseID).
-			Scan(&functionID, &currentName, &currentLength, &currentMetadata)
+			Scan(&functionID, &currentName, &currentLength, &currentMetadata, &currentAddress)
 		isNew := errors.Is(err, sql.ErrNoRows)
 		if err != nil && !isNew {
 			return nil, err
 		}
+		if !isNew && !hasAddress {
+			addressText = currentAddress
+		}
 		isChanged := isNew || currentName != f.Name || currentLength != f.Length || !bytes.Equal(currentMetadata, f.Metadata)
 		if !isChanged {
+			if currentAddress != addressText {
+				if _, err := tx.ExecContext(ctx,
+					"UPDATE functions SET ea64=$1::numeric WHERE id=$2",
+					addressText, functionID); err != nil {
+					return nil, err
+				}
+			}
 			continue
 		}
 		score := metadata.Score(f.Metadata)
@@ -498,13 +518,15 @@ FROM functions WHERE checksum=$1 AND database_id=$2`, f.Hash, databaseID).
 		}
 		if isNew {
 			functionID, err = upsertID(ctx, tx, `
-INSERT INTO functions (name, length, database_id, checksum, metadata, score)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id`, f.Name, f.Length, databaseID, f.Hash, f.Metadata, score)
+INSERT INTO functions (name, length, database_id, checksum, metadata, score, ea64)
+VALUES ($1, $2, $3, $4, $5, $6, $7::numeric)
+RETURNING id`, f.Name, f.Length, databaseID, f.Hash, f.Metadata, score, addressText)
 		} else {
 			_, err = tx.ExecContext(ctx, `
-UPDATE functions SET name=$1, length=$2, metadata=$3, score=$4, updated_at=CURRENT_TIMESTAMP
-WHERE id=$5`, f.Name, f.Length, f.Metadata, score, functionID)
+UPDATE functions
+SET name=$1, length=$2, metadata=$3, score=$4, ea64=$5::numeric,
+    updated_at=CURRENT_TIMESTAMP
+WHERE id=$6`, f.Name, f.Length, f.Metadata, score, addressText, functionID)
 		}
 		if err != nil {
 			return nil, err
@@ -540,6 +562,64 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		return nil, err
 	}
 	return status, nil
+}
+
+func (s *Store) PopularFunctions(
+	ctx context.Context, limit uint32,
+) ([]protocol.PopularFunction, error) {
+	if limit == 0 {
+		limit = 10
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+WITH ranked AS (
+  SELECT fc.name, fc.length, fc.metadata, fn.checksum,
+         LEAST(COALESCE(freq.frequency, 0), 4294967295) AS frequency,
+         u.hostname, db.file_path, fi.checksum AS file_md5, fn.ea64::text AS ea64,
+         fc.changed_at,
+         ROW_NUMBER() OVER (
+           PARTITION BY fn.checksum
+           ORDER BY fc.accepted DESC, fc.score DESC, fc.id ASC
+         ) AS rank_no
+  FROM function_changes fc
+  JOIN functions fn ON fn.id=fc.function_id
+  JOIN databases db ON db.id=fn.database_id
+  JOIN users u ON u.id=db.user_id
+  JOIN files fi ON fi.id=db.file_id
+  LEFT JOIN function_frequencies freq ON freq.checksum=fn.checksum
+)
+SELECT name, length, metadata, checksum, frequency, hostname, file_path, file_md5, ea64
+FROM ranked
+WHERE rank_no=1
+ORDER BY frequency DESC, changed_at DESC, name
+LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var functions []protocol.PopularFunction
+	for rows.Next() {
+		var function protocol.PopularFunction
+		var fileMD5 []byte
+		var addressText string
+		if err := rows.Scan(
+			&function.Name, &function.Length, &function.Metadata, &function.Pattern,
+			&function.Frequency, &function.Hostname, &function.FilePath,
+			&fileMD5, &addressText,
+		); err != nil {
+			return nil, err
+		}
+		function.PatternType = 1
+		copy(function.FileMD5[:], fileMD5)
+		function.Address, err = strconv.ParseUint(addressText, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("decode function address: %w", err)
+		}
+		functions = append(functions, function)
+	}
+	return functions, rows.Err()
 }
 
 func upsertID(ctx context.Context, tx *sql.Tx, query string, args ...any) (int64, error) {

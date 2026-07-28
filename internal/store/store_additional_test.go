@@ -146,6 +146,7 @@ func TestStoreValidationAndClosedDatabaseErrors(t *testing.T) {
 	}{
 		{"stats", func() error { _, err := s.Stats(ctx); return err }},
 		{"pull", func() error { _, err := s.Pull(ctx, [][]byte{hash}); return err }},
+		{"popular functions", func() error { _, err := s.PopularFunctions(ctx, 10); return err }},
 		{"push", func() error { _, err := s.Push(ctx, identity, push); return err }},
 		{"delete", func() error { _, err := s.DeleteHashes(ctx, [][]byte{hash}); return err }},
 		{"histories", func() error { _, err := s.Histories(ctx, hash, 1); return err }},

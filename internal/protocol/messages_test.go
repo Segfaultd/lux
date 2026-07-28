@@ -54,8 +54,8 @@ func TestDecodePushMetadata(t *testing.T) {
 		f.Unknown != 9 || f.Hash[0] != 0x55 {
 		t.Fatalf("unexpected pushed function: %#v", f)
 	}
-	if len(got.Trailing) != 2 || got.Trailing[1] != math.MaxUint64 {
-		t.Fatalf("unexpected trailing values: %#v", got.Trailing)
+	if len(got.Addresses) != 2 || got.Addresses[1] != math.MaxUint64 {
+		t.Fatalf("unexpected function addresses: %#v", got.Addresses)
 	}
 }
 
@@ -123,20 +123,83 @@ func TestResponseEncoders(t *testing.T) {
 		}
 	})
 	t.Run("hello", func(t *testing.T) {
-		d := NewDecoder(EncodeHelloResult(2))
-		for range 4 {
-			if _, err := d.CString(); err != nil {
-				t.Fatal(err)
-			}
+		d := NewDecoder(EncodeHelloResult(LuminaUser{
+			LicenseID: "AB-1234-CDEF-90", LicenseName: "Analyst",
+			Email: "analyst@example.test", Username: "analyst",
+			Karma: -2, LastActive: 123, Features: UserIsAdmin | UserCanDeleteHistory,
+		}))
+		licenseID, _ := d.CString()
+		licenseName, _ := d.CString()
+		email, _ := d.CString()
+		username, _ := d.CString()
+		if licenseID != "AB-1234-CDEF-90" || licenseName != "Analyst" ||
+			email != "analyst@example.test" || username != "analyst" {
+			t.Fatalf("bad user profile %q %q %q %q", licenseID, licenseName, email, username)
 		}
-		if karma, _ := d.DD(); karma != 0 {
+		if karma, _ := d.DD(); karma != ^uint32(1) {
 			t.Fatalf("karma %d", karma)
 		}
-		if active, _ := d.DQ(); active != 0 {
+		if active, _ := d.DQ(); active != 123 {
 			t.Fatalf("last active %d", active)
 		}
-		if features, _ := d.DD(); features != 2 {
+		if features, _ := d.DD(); features != 3 {
 			t.Fatalf("features %d", features)
+		}
+	})
+	t.Run("popular functions", func(t *testing.T) {
+		md5 := [16]byte{1, 2, 3}
+		payload := EncodePopularResult([]PopularFunction{{
+			Name: "popular", Length: 64, Metadata: []byte{4, 5},
+			PatternType: 1, Pattern: []byte{6, 7}, Frequency: 99,
+			Hostname: "host", FilePath: "/sample.bin", FileMD5: md5, Address: 0x401000,
+		}})
+		d := NewDecoder(payload)
+		count, _ := d.DD()
+		name, _ := d.CString()
+		length, _ := d.DD()
+		metadata, _ := d.Bytes()
+		patternType, _ := d.DD()
+		pattern, _ := d.Bytes()
+		frequency, _ := d.DD()
+		hostname, _ := d.CString()
+		filePath, _ := d.CString()
+		gotMD5, _ := d.Fixed(16)
+		address, _ := d.DQ()
+		if count != 1 || name != "popular" || length != 64 ||
+			!bytes.Equal(metadata, []byte{4, 5}) || patternType != 1 ||
+			!bytes.Equal(pattern, []byte{6, 7}) || frequency != 99 ||
+			hostname != "host" || filePath != "/sample.bin" ||
+			!bytes.Equal(gotMD5, md5[:]) || address != 0x401000 || d.Remaining() != 0 {
+			t.Fatal("bad popular-functions encoding")
+		}
+	})
+	t.Run("server info", func(t *testing.T) {
+		payload := EncodeLuminaInfoResult(LuminaConnectionInfo{
+			SessionID: 7, PeerName: "192.0.2.1:1234",
+			User:        LuminaUser{Username: "analyst", Features: UserIsAdmin},
+			Established: 11, ServerMAC: "00:11:22:33:44:55",
+			ServerVersion: "lux-test", ServerStarted: 12, ServerTime: 13,
+		})
+		d := NewDecoder(payload)
+		sessionID, _ := d.DD()
+		peer, _ := d.CString()
+		for range 3 {
+			_, _ = d.CString()
+		}
+		username, _ := d.CString()
+		_, _ = d.DD()
+		_, _ = d.DQ()
+		features, _ := d.DD()
+		established, _ := d.DQ()
+		mac, _ := d.CString()
+		version, _ := d.CString()
+		started, _ := d.DQ()
+		current, _ := d.DQ()
+		if sessionID != 7 || peer != "192.0.2.1:1234" || username != "analyst" ||
+			features != UserIsAdmin || established != 11 ||
+			mac != "00:11:22:33:44:55" || version != "lux-test" ||
+			started != 12 || current != 13 || d.Remaining() != 0 {
+			t.Fatal("bad server-info encoding")
 		}
 	})
 	t.Run("pull", func(t *testing.T) {
@@ -199,8 +262,20 @@ func TestMessageDecodeErrors(t *testing.T) {
 		{"hello", func(v []byte) error { _, err := DecodeHello(v); return err }},
 		{"pull", func(v []byte) error { _, err := DecodePullMetadata(v); return err }},
 		{"push", func(v []byte) error { _, err := DecodePushMetadata(v); return err }},
+		{"popular", func(v []byte) error { _, err := DecodeGetPopular(v); return err }},
 		{"delete", func(v []byte) error { _, err := DecodeDeleteHistory(v); return err }},
 		{"histories", func(v []byte) error { _, err := DecodeGetFuncHistories(v); return err }},
+	}
+	var popular Encoder
+	popular.DD(1001)
+	if _, err := DecodeGetPopular(popular.Payload()); err == nil {
+		t.Fatal("oversized popular-functions request accepted")
+	}
+	var trailingPopular Encoder
+	trailingPopular.DD(1)
+	trailingPopular.DD(1)
+	if _, err := DecodeGetPopular(trailingPopular.Payload()); err == nil {
+		t.Fatal("popular-functions request with trailing data accepted")
 	}
 	for _, decoder := range decoders {
 		t.Run(decoder.name, func(t *testing.T) {

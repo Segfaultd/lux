@@ -168,11 +168,13 @@ Structured edits create the same immutable administrative push/revision records 
 
 ## Native protocol design
 
-A TCP/TLS listener performs a credential-bearing hello exchange and then
-handles a stream of request/response transactions. Packets use a four-byte
-big-endian payload length, one message-code byte, and IDA's compact positional
-encoding. PostgreSQL stores users, input files, IDBs, pushes, current function
-metadata, and immutable history.
+A TCP/TLS listener performs a credential-bearing hello exchange with the full
+Lumina user profile and then handles metadata pull/push, popular-functions,
+server-information, history, and deletion transactions. Packets use a
+four-byte big-endian payload length, one message-code byte, and IDA's compact
+positional encoding. PostgreSQL stores users, input files, IDBs, function
+addresses, pull frequencies, pushes, current metadata selection, and immutable
+history.
 
 Native behavior follows the official compatibility matrix. Management features
 that do not exist in the IDA protocol remain isolated HTTP extensions.

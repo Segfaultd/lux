@@ -11,8 +11,12 @@ const (
 	CodePullMetadataResult     = 0x0f
 	CodePushMetadata           = 0x10
 	CodePushMetadataResult     = 0x11
+	CodeGetPopular             = 0x12
+	CodeGetPopularResult       = 0x13
 	CodeDeleteHistory          = 0x18
 	CodeDeleteHistoryResult    = 0x19
+	CodeGetLuminaInfo          = 0x2b
+	CodeGetLuminaInfoResult    = 0x2c
 	CodeGetFuncHistories       = 0x2f
 	CodeGetFuncHistoriesResult = 0x30
 	CodeHelloResult            = 0x31
@@ -24,6 +28,11 @@ const (
 	PushOverride                    uint32 = 0x01
 	PushDoNotOverride               uint32 = 0x02
 	PushMerge                       uint32 = 0x03
+)
+
+const (
+	UserIsAdmin          uint32 = 0x01
+	UserCanDeleteHistory uint32 = 0x02
 )
 
 const (
@@ -64,13 +73,13 @@ type PushFunction struct {
 }
 
 type PushMetadata struct {
-	Flags    uint32
-	IDBPath  string
-	FilePath string
-	MD5      [16]byte
-	Hostname string
-	Funcs    []PushFunction
-	Trailing []uint64
+	Flags     uint32
+	IDBPath   string
+	FilePath  string
+	MD5       [16]byte
+	Hostname  string
+	Funcs     []PushFunction
+	Addresses []uint64
 }
 
 type DeleteHistory struct {
@@ -93,6 +102,40 @@ type FunctionHistory struct {
 	Name      string
 	Metadata  []byte
 	Timestamp uint64
+}
+
+type LuminaUser struct {
+	LicenseID   string
+	LicenseName string
+	Email       string
+	Username    string
+	Karma       int32
+	LastActive  uint64
+	Features    uint32
+}
+
+type PopularFunction struct {
+	Name        string
+	Length      uint32
+	Metadata    []byte
+	PatternType uint32
+	Pattern     []byte
+	Frequency   uint32
+	Hostname    string
+	FilePath    string
+	FileMD5     [16]byte
+	Address     uint64
+}
+
+type LuminaConnectionInfo struct {
+	SessionID     uint32
+	PeerName      string
+	User          LuminaUser
+	Established   uint64
+	ServerMAC     string
+	ServerVersion string
+	ServerStarted uint64
+	ServerTime    uint64
 }
 
 func DecodeHello(payload []byte) (Hello, error) {
@@ -209,9 +252,9 @@ func DecodePushMetadata(payload []byte) (PushMetadata, error) {
 	if err != nil {
 		return out, err
 	}
-	out.Trailing = make([]uint64, n)
-	for i := range out.Trailing {
-		if out.Trailing[i], err = d.DQ(); err != nil {
+	out.Addresses = make([]uint64, n)
+	for i := range out.Addresses {
+		if out.Addresses[i], err = d.DQ(); err != nil {
 			return out, err
 		}
 	}
@@ -302,15 +345,65 @@ func EncodeFail(code uint32, message string) []byte {
 	return e.Payload()
 }
 
-func EncodeHelloResult(features uint32) []byte {
+func DecodeGetPopular(payload []byte) (uint32, error) {
+	d := NewDecoder(payload)
+	nresults, err := d.DD()
+	if err != nil {
+		return 0, err
+	}
+	if d.Remaining() != 0 {
+		return 0, fmt.Errorf("%w: trailing popular-functions request data", ErrInvalidData)
+	}
+	if nresults > 1000 {
+		return 0, fmt.Errorf("%w: too many popular-functions results", ErrInvalidData)
+	}
+	return nresults, nil
+}
+
+func encodeLuminaUser(e *Encoder, user LuminaUser) {
+	e.CString(user.LicenseID)
+	e.CString(user.LicenseName)
+	e.CString(user.Email)
+	e.CString(user.Username)
+	e.DD(uint32(user.Karma))
+	e.DQ(user.LastActive)
+	e.DD(user.Features)
+}
+
+func EncodeHelloResult(user LuminaUser) []byte {
 	var e Encoder
-	e.CString("")
-	e.CString("")
-	e.CString("")
-	e.CString("")
-	e.DD(0)
-	e.DQ(0)
-	e.DD(features)
+	encodeLuminaUser(&e, user)
+	return e.Payload()
+}
+
+func EncodePopularResult(functions []PopularFunction) []byte {
+	var e Encoder
+	e.DD(uint32(len(functions)))
+	for _, function := range functions {
+		e.CString(function.Name)
+		e.DD(function.Length)
+		e.Bytes(function.Metadata)
+		e.DD(function.PatternType)
+		e.Bytes(function.Pattern)
+		e.DD(function.Frequency)
+		e.CString(function.Hostname)
+		e.CString(function.FilePath)
+		e.Fixed(function.FileMD5[:])
+		e.DQ(function.Address)
+	}
+	return e.Payload()
+}
+
+func EncodeLuminaInfoResult(info LuminaConnectionInfo) []byte {
+	var e Encoder
+	e.DD(info.SessionID)
+	e.CString(info.PeerName)
+	encodeLuminaUser(&e, info.User)
+	e.DQ(info.Established)
+	e.CString(info.ServerMAC)
+	e.CString(info.ServerVersion)
+	e.DQ(info.ServerStarted)
+	e.DQ(info.ServerTime)
 	return e.Payload()
 }
 
