@@ -90,7 +90,7 @@ func NewWithSessions(
 	mux.HandleFunc("DELETE /api/v1/accounts/{username}/sessions", s.terminateAccountSessions)
 	mux.HandleFunc("GET /api/v1/sessions", s.listSessions)
 	mux.HandleFunc("DELETE /api/v1/sessions/{id}", s.terminateSession)
-	// Lumen-compatible read-only HTTP routes.
+	// Read-only compatibility HTTP routes.
 	mux.HandleFunc("GET /api/files/{md5}", s.legacyFile)
 	mux.HandleFunc("GET /api/funcs/{hash}", s.legacyFunction)
 	static, _ := fs.Sub(assets, "static")

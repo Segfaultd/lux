@@ -90,8 +90,8 @@ var keyDescriptions = map[uint32]keyDescription{
 }
 
 // Decode splits an IDA metadata blob into lossless chunks and decodes fields
-// whose wire grammar is public or established by Lumen. Payload always contains
-// the original bytes, including for known chunks, so callers can round-trip data.
+// whose wire grammar is supported. Payload always contains the original bytes,
+// including for known chunks, so callers can round-trip data.
 func Decode(data []byte) (Document, error) {
 	doc := Document{Size: len(data), Chunks: []Chunk{}}
 	d := protocol.NewDecoder(data)

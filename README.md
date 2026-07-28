@@ -1,213 +1,487 @@
 # Lux
 
-Lux is a compact, private [IDA Lumina](https://hex-rays.com/products/ida/lumina/) server written in Go. It speaks the Lumina RPC protocol used by IDA 7.2 and later, stores function metadata in PostgreSQL, and serves its management console from the same executable.
+> A self-hosted IDA Lumina server with PostgreSQL persistence and an embedded
+> management console.
 
-Lux targets the behavior exposed by native IDA clients and the official Lumina SDK and administration documentation. The compatibility matrix and normative references are in [`docs/OFFICIAL_LUMINA_PARITY.md`](docs/OFFICIAL_LUMINA_PARITY.md). The original Lumen investigation remains only as historical implementation research in [`docs/LUMEN_ANALYSIS.md`](docs/LUMEN_ANALYSIS.md).
+[![CI](https://github.com/Segfaultd/lux/actions/workflows/ci.yml/badge.svg)](https://github.com/Segfaultd/lux/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white)](compose.yaml)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## What it supports
+Lux accepts native Lumina connections from IDA, authenticates users against
+PostgreSQL, stores contributed function metadata, and returns the selected
+metadata for matching function hashes. The same Go executable serves a
+browser-based administration console, a JSON management API, health checks,
+and Prometheus metrics.
 
-- Lumina wire formats 0 through 5 and newer; authenticated operation requires credential-capable protocol version 3+
-- IDA hello/login, metadata pull, metadata push, delete history, and function history RPCs
-- Official higher-quality metadata replacement and deterministic pull selection
-- Immutable push and per-function revision history with native IDA history responses
-- PostgreSQL persistence with connection pooling, foreign keys, and automatic schema creation
-- Optional TLS with a PEM certificate and key
-- Embedded administration console for role-based accounts, live sessions, IDB projects, pushes, semantic revision diffs, files, functions, structured/raw metadata versions, restore, and protected deletion
-- JSON management API, optional legacy read-only HTTP aliases, health check, and Prometheus metrics
-- One static, CGO-free binary and a small scratch-based container image
+Lux is designed for private deployments where an organization wants to retain
+its IDA metadata and manage its own users, projects, history, and retention
+policy.
+
+## Contents
+
+- [Features](#features)
+- [Quick start](#quick-start)
+- [Connect IDA](#connect-ida)
+- [Management console](#management-console)
+- [Configuration](#configuration)
+- [Authentication and authorization](#authentication-and-authorization)
+- [Native protocol behavior](#native-protocol-behavior)
+- [Metadata and history](#metadata-and-history)
+- [Architecture](#architecture)
+- [Operations](#operations)
+- [Development](#development)
+- [Compatibility](#compatibility)
+
+## Features
+
+### Native IDA service
+
+- Credential-bearing Lumina hello exchange for protocol versions 3 and newer.
+- Metadata pull and push with per-function result codes.
+- Function history retrieval and optional history deletion.
+- Popular-functions and server-information RPCs.
+- Pull-frequency tracking, including `PULL_MD_SEEN_FILE`.
+- Better-score, force-override, and do-not-override push modes.
+- Full user profile flags for administrator and history-deletion privileges.
+- Optional TLS 1.2+ using a PEM certificate and private key.
+- Configurable hello, command, pull, and graceful-shutdown timeouts.
+
+### Durable storage
+
+- PostgreSQL is the only supported database.
+- Automatic, idempotent schema creation during startup.
+- Connection pooling through `pgx` and `database/sql`.
+- Immutable push records and function revision history.
+- Deterministic current-version selection for every function hash.
+- Persistent attribution to username, license ID, email, host, IDB, and input
+  file.
+- Transactional cleanup when projects, revisions, or functions are deleted.
+
+### Administration
+
+- Self-served management console embedded in the Lux binary.
+- Dynamic account creation, profile editing, password rotation, disablement,
+  and deletion.
+- Immediate session revocation after security-sensitive account changes.
+- Live session inspection and termination.
+- Browsing and searching of functions, files, projects, pushes, and revisions.
+- Raw and structured metadata inspection and editing.
+- Semantic revision diffs and auditable revision restore.
+- Official-style user statistics and push/history filters.
+- Bearer-token protection for management mutations.
+- Global kill switch for destructive operations.
+
+### Operations
+
+- Docker Compose stack with a health-checked PostgreSQL service.
+- Single, statically linked Go binary with embedded frontend assets.
+- Scratch-based runtime container.
+- Database-backed `/healthz` endpoint.
+- Prometheus-compatible `/metrics` endpoint.
+- Structured logs with an optional debug level.
+- PostgreSQL-backed unit, integration, race, and coverage tests.
 
 ## Quick start
 
-The recommended startup path boots Lux and PostgreSQL together:
+### Requirements
 
-```sh
-export LUX_ADMIN_TOKEN='choose-a-secret'
+- Docker with Compose support.
+- TCP port `1234` available for IDA clients.
+- TCP port `8080` available for the management console.
+
+### Start Lux and PostgreSQL
+
+For a disposable local evaluation:
+
+```bash
+docker compose up --build -d
+docker compose ps
+curl --fail http://127.0.0.1:8080/healthz
+```
+
+The development defaults are:
+
+| Service | Address | Default credential |
+|---|---|---|
+| Lumina protocol | `127.0.0.1:1234` | `guest` / `change-me` |
+| Management console | <http://127.0.0.1:8080> | bearer token `change-me` |
+| PostgreSQL | `127.0.0.1:55432` | database/user/password `lux` |
+
+For a persistent deployment, set real secrets before the first startup:
+
+```bash
+export LUX_PASSWORD='replace-with-a-long-password'
+export LUX_ADMIN_TOKEN='replace-with-a-separate-management-token'
+export LUX_POSTGRES_PASSWORD='replace-with-a-database-password'
 docker compose up --build -d
 ```
 
-The defaults are:
+> [!IMPORTANT]
+> Bootstrap settings are used only while the account table is empty. Changing
+> `LUX_USERNAME` or `LUX_PASSWORD` later does not overwrite accounts already
+> stored in PostgreSQL. Use the management console to rotate an existing
+> password. The PostgreSQL container likewise applies its database name, user,
+> and password while initializing an empty data volume; changing those
+> variables does not rewrite an existing PostgreSQL cluster.
 
-- Lumina protocol: `0.0.0.0:1234`
-- Management console: `http://localhost:8080`
-- PostgreSQL: `127.0.0.1:55432`, database/user/password `lux` (Lux uses the private Compose network)
-- Initial IDA credentials: username `guest`, password `change-me`
+PostgreSQL data is retained in the `postgres-data` volume. View service logs
+with:
 
-PostgreSQL data lives in the `postgres-data` Docker volume. Customize its credentials with `LUX_POSTGRES_DB`, `LUX_POSTGRES_USER`, and `LUX_POSTGRES_PASSWORD` before the first startup.
-Compose passes credentials to Lux through PostgreSQL's `PG*` environment variables, so passwords do not need URL escaping.
-
-To run the Go binary directly, Go 1.25 or newer and a reachable PostgreSQL server are required:
-
-```sh
-go build -o lux ./cmd/lux
-LUX_DATABASE_URL='postgres://lux:lux@127.0.0.1:5432/lux?sslmode=disable' \
-  ./lux -admin-token 'choose-a-secret'
+```bash
+docker compose logs -f lux
 ```
 
-## Configure IDA
+### Run the binary directly
 
-In IDA 8.1 or later, open **Options → General → Lumina**, select **Use a private server**, and set:
+Go 1.25 or newer and a reachable PostgreSQL server are required:
 
-- Host: the Lux host
-- Port: `1234` (or your configured port)
-- Username: `guest`
-- Password: `change-me` with the default Compose configuration
+```bash
+go build -o lux ./cmd/lux
 
-For plaintext operation, launch IDA with `LUMINA_TLS=false` in its environment. For older IDA releases, set `LUMINA_HOST`, `LUMINA_PORT`, and `LUMINA_TLS = NO` in `ida.cfg` or `idauser.cfg`.
+LUX_DATABASE_URL='postgres://lux:lux@127.0.0.1:5432/lux?sslmode=disable' \
+LUX_PASSWORD='replace-with-a-long-password' \
+LUX_ADMIN_TOKEN='replace-with-a-separate-management-token' \
+./lux
+```
 
-## Configuration
+Lux also accepts standard PostgreSQL `PG*` variables when
+`LUX_DATABASE_URL` is empty:
 
-Every option has a command-line flag and an environment variable:
+```bash
+PGHOST=127.0.0.1 \
+PGPORT=5432 \
+PGDATABASE=lux \
+PGUSER=lux \
+PGPASSWORD='database-password' \
+PGSSLMODE=disable \
+LUX_DATABASE_URL='' \
+./lux
+```
 
-| Flag | Environment | Default | Purpose |
-|---|---|---:|---|
-| `-lumina-addr` | `LUX_LUMINA_ADDR` | `:1234` | IDA protocol listener |
-| `-http-addr` | `LUX_HTTP_ADDR` | `:8080` | Management listener |
-| `-database-url` | `LUX_DATABASE_URL` | `postgres://lux:lux@127.0.0.1:5432/lux?sslmode=disable` | PostgreSQL connection URL |
-| `-server-name` | `LUX_SERVER_NAME` | `lux` | Name shown to clients |
-| `-username` | `LUX_USERNAME` | `guest` | Initial IDA account, only used when the account table is empty |
-| `-password` | `LUX_PASSWORD` | empty | Initial password; an empty value creates a disabled-for-login account until a password is assigned |
-| `-admin-token` | `LUX_ADMIN_TOKEN` | empty | Bearer token for management changes |
-| `-allow-deletes` | `LUX_ALLOW_DELETES` | `false` | Enable RPC and web deletion |
-| `-history-limit` | `LUX_HISTORY_LIMIT` | `50` | Histories per hash; 0 disables |
-| `-tls-cert` | `LUX_TLS_CERT` | empty | PEM server certificate |
-| `-tls-key` | `LUX_TLS_KEY` | empty | PEM private key |
+## Connect IDA
 
-Set `LUX_LOG_LEVEL=debug` for protocol and request diagnostics.
+Configure IDA to use a private Lumina server and provide:
 
-### IDA login accounts
+| Setting | Value |
+|---|---|
+| Host | Hostname or IP address of the Lux machine |
+| Port | `1234`, unless `LUX_LUMINA_ADDR` was changed |
+| Username | A Lux account, initially `guest` with Compose defaults |
+| Password | The password assigned to that account |
 
-Lumina usernames, profile fields, privilege flags, and bcrypt password hashes are stored in PostgreSQL. On the first startup, Lux creates an administrator with history-deletion permission from `LUX_USERNAME` and `LUX_PASSWORD`; later environment changes do not overwrite database-managed credentials. Accounts created later are regular Lumina users.
+The IDA menu and configuration-file location vary by release. See the
+[official Lumina user documentation](https://docs.hex-rays.com/ida-9.2/user-guide/user-interface/menu-bar/common-actions-3)
+for the controls available in your installation.
 
-Open **Authentication** in the management console to add accounts, edit email and license ID, assign the official administrator and history-deletion flags, rotate passwords, enable or disable access, and remove accounts without restarting Lux. Every regular user can pull, push, and inspect metadata history. `is_admin` grants server administration and `can_delete_history` independently permits native history deletion when deletion is globally enabled. The management token is required. Lux prevents disabling or deleting the final enabled account, and historical metadata remains attached to its original username even if that account is later removed. Password rotation, privilege/profile changes, disablement, and deletion immediately disconnect every active session for the affected account. Accounts created without a password cannot authenticate until one is assigned.
+The client and server must agree on transport:
 
-### TLS and IDA certificate pinning
+- For a plaintext Lux listener, launch IDA with `LUMINA_TLS=false`. Releases
+  that use configuration files can set `LUMINA_TLS = NO` in `ida.cfg` or
+  `idauser.cfg`.
+- For a TLS-enabled listener, install the Lux public certificate where IDA
+  expects its private-server certificate and enable TLS.
 
-Create a certificate and key:
+To create a self-signed test certificate:
 
-```sh
+```bash
 openssl req -x509 -newkey rsa:4096 -nodes \
-  -keyout lux.key -out lux.crt -days 365
+  -keyout lux.key \
+  -out lux.crt \
+  -days 365 \
+  -subj '/CN=lux'
+
 ./lux -tls-cert lux.crt -tls-key lux.key
 ```
 
-IDA pins the Lumina server certificate. Copy the public certificate to `hexrays.crt` in the IDA installation directory. Lux uses PEM certificate/key pairs; it does not load PKCS#12 identities directly.
+Lux loads PEM files and requires both the certificate and key. The native
+listener enforces TLS 1.2 or newer when TLS is enabled. IDA pins the
+private-server certificate; copy the public certificate to `hexrays.crt` in
+the applicable IDA installation directory.
 
-## Management API
+## Management console
 
-| Method | Route | Description |
-|---|---|---|
-| `GET` | `/healthz` | Database-backed liveness check |
-| `GET` | `/metrics` | Prometheus metrics |
-| `GET` | `/api/v1/stats?username=alice,bob` | Aggregate counts or official per-user statistics |
-| `GET` | `/api/v1/functions?q=` | Search best function records |
-| `GET` | `/api/v1/functions/{hash}` | Inspect all stored versions |
-| `DELETE` | `/api/v1/functions/{hash}` | Delete all versions |
-| `GET` | `/api/v1/files?q=` | Search source files |
-| `GET` | `/api/v1/files/{md5}/functions` | List a file's functions |
-| `GET` | `/api/v1/pushes?q=` | Search immutable native and administrative pushes |
-| `GET` | `/api/v1/pushes/{id}` | Inspect one push and all of its changed functions |
-| `DELETE` | `/api/v1/pushes/{id}` | Delete a push and reconcile affected functions |
-| `GET` | `/api/v1/history?q=` | Search function revisions |
-| `GET` | `/api/v1/history/{id}` | Inspect a revision and its previous-value diff |
-| `POST` | `/api/v1/history/{id}/restore` | Restore a revision as a new current revision |
-| `DELETE` | `/api/v1/history/{id}` | Delete a revision and reconcile its function |
-| `GET` | `/api/v1/projects?q=` | Search contributed IDB projects |
-| `GET` | `/api/v1/projects/{id}` | Inspect a project and its function versions |
-| `PATCH` | `/api/v1/projects/{id}` | Change a project's file or IDB path |
-| `DELETE` | `/api/v1/projects/{id}` | Delete a project and its contributed versions |
-| `GET` | `/api/v1/metadata/{id}` | Inspect one function metadata version |
-| `PATCH` | `/api/v1/metadata/{id}` | Change a version's name, length, or metadata bytes |
-| `DELETE` | `/api/v1/metadata/{id}` | Delete one metadata version |
-| `GET` | `/api/v1/metadata/{id}/structured` | Decode a version into lossless Lumina metadata chunks |
-| `PATCH` | `/api/v1/metadata/{id}/structured` | Set, remove, or append metadata chunks |
-| `GET`, `POST` | `/api/v1/accounts` | List or create IDA login accounts |
-| `PUT` | `/api/v1/accounts/{username}/password` | Rotate an account password |
-| `PATCH` | `/api/v1/accounts/{username}` | Change account profile, privilege flags, or enabled state |
-| `DELETE` | `/api/v1/accounts/{username}` | Remove an account |
-| `DELETE` | `/api/v1/accounts/{username}/sessions` | Terminate every active session for an account |
-| `GET` | `/api/v1/sessions` | List authenticated Lumina sessions and activity |
-| `DELETE` | `/api/v1/sessions/{id}` | Terminate one active Lumina session |
+Open <http://127.0.0.1:8080> and enter the configured management token in the
+header. The token is kept in browser session storage and is cleared when the
+tab session ends.
 
-Deletion must be enabled with `LUX_ALLOW_DELETES=true`. Account management always requires a configured admin token, and all other mutations require it when configured. Send `Authorization: Bearer <token>`; the browser console keeps it only in session storage.
+The console provides:
 
-Push searches accept `q`, `username`, `license_id`, `project_id`, `from`, `to`,
-and `chronological`. History additionally accepts `name`, `hash`, `idb`,
-`input`, `file_md5`, `push_id`, `history_id_from`, `history_id_to`,
-`push_id_from`, and `push_id_to`. Timestamps use RFC3339. These correspond to
-the official `lc hist pushes` and `lc hist show` filters. Native pushes snapshot
-the account's license ID, name, and email even when they contain no changed
-functions; only actual metadata changes create revisions. Restoring a revision
-creates a new auditable revision instead of rewriting history.
+| Section | Operations |
+|---|---|
+| Overview | Storage totals, per-user statistics, and server configuration |
+| Authentication | Accounts, profiles, privileges, passwords, and status |
+| Sessions | Connected clients, activity, transfer counters, and termination |
+| Projects / IDBs | Input files, IDB paths, contributors, and function versions |
+| Push history | Push identity snapshots, revisions, filters, diffs, and restore |
+| Functions | Current selections and every contributed version |
+| Files | Input-file hashes and associated functions |
+| Server | Listener, deletion, history, and observability state |
 
-Legacy compatibility aliases are available at `GET /api/files/{md5}` and `GET /api/funcs/{hash}`. They are Lux extensions and are not part of the native Lumina protocol.
+The management listener is plain HTTP. Bind it to a private interface or place
+it behind an HTTPS reverse proxy when it crosses an untrusted network.
 
-The management listener serves plain HTTP. Bind it to localhost or put it behind an HTTPS reverse proxy when it is reachable over an untrusted network; bearer tokens should never travel over unencrypted public connections.
+The complete HTTP reference, including request bodies and filter parameters, is
+in [Management API](docs/MANAGEMENT_API.md).
 
-### Structured metadata
+## Configuration
 
-IDA stores function metadata as a sequence of `[key][length][payload]` chunks. Lux recognizes the current SDK keys:
+Command-line flags override the corresponding environment-derived defaults.
 
-| Code | Field | Lux decoding/editing |
-|---:|---|---|
-| 1 | Function prototype and serialized types | Source flag plus lossless type/field hex |
-| 2 | Decompiler elapsed time | Signed 64-bit seconds |
-| 3–4 | Function regular/repeatable comments | UTF-8 text |
-| 5–6 | Instruction regular/repeatable comments | Offset and UTF-8 text |
-| 7 | Anterior/posterior comments | Offset, kind, and UTF-8 text |
-| 8 | User-defined stack points | Offset and signed stack delta |
-| 9 | Frame description and stack variables | Named, sized, and preserved as raw payload |
-| 10–11 | Operand and extended operand representations | Named, sized, and preserved as raw payload |
+| Flag | Environment variable | Default | Description |
+|---|---|---|---|
+| `-lumina-addr` | `LUX_LUMINA_ADDR` | `:1234` | Native Lumina listen address |
+| `-http-addr` | `LUX_HTTP_ADDR` | `:8080` | Management HTTP listen address |
+| `-database-url` | `LUX_DATABASE_URL` | `postgres://lux:lux@127.0.0.1:5432/lux?sslmode=disable` | PostgreSQL URL; empty uses `PG*` variables |
+| `-server-name` | `LUX_SERVER_NAME` | `lux` | Name included in client-facing messages |
+| `-username` | `LUX_USERNAME` | `guest` | Initial account name when no accounts exist |
+| `-password` | `LUX_PASSWORD` | empty | Initial password; empty creates a passwordless account that cannot log in |
+| `-admin-token` | `LUX_ADMIN_TOKEN` | empty | Bearer token for management mutations |
+| `-allow-deletes` | `LUX_ALLOW_DELETES` | `false` | Enables native and HTTP destructive operations |
+| `-history-limit` | `LUX_HISTORY_LIMIT` | `50` | Maximum native history records per function; `0` disables history RPCs |
+| `-tls-cert` | `LUX_TLS_CERT` | empty | PEM certificate for the native listener |
+| `-tls-key` | `LUX_TLS_KEY` | empty | PEM private key for the native listener |
+| `-command-timeout` | `LUX_COMMAND_TIMEOUT` | `1h` | Idle timeout after authentication |
+| `-hello-timeout` | `LUX_HELLO_TIMEOUT` | `15s` | Deadline for the initial hello packet |
+| `-pull-timeout` | `LUX_PULL_TIMEOUT` | `4m` | Database deadline for pull and popular-function queries |
+| `-shutdown-timeout` | `LUX_SHUTDOWN_TIMEOUT` | `10s` | Graceful HTTP shutdown window |
 
-Frame members and operand representations contain IDA-internal `opinfo_t` variants without a public standalone wire grammar. Lux therefore does not guess at those fields: the explorer exposes their exact payload, and any untouched chunk is reproduced byte-for-byte. Unknown future keys receive the same treatment. This keeps metadata from newer IDA releases safe when an older Lux instance views or edits another field.
+Set `LUX_LOG_LEVEL=debug` to include protocol and HTTP request diagnostics.
+Invalid boolean, unsigned-integer, and duration environment values fall back to
+their defaults.
 
-The structured patch endpoint accepts ordered mutations. `set` and `remove` require a zero-based chunk `index`; `append` requires a non-zero `code`. A mutation must contain exactly one value: `text`, `elapsed_seconds`, `type`, `comments`, `stack_points`, or raw hexadecimal `payload`.
+## Authentication and authorization
+
+Lux keeps native IDA accounts in PostgreSQL and stores passwords as bcrypt
+hashes. Usernames are matched case-insensitively.
+
+The first account is created at startup from `LUX_USERNAME` and `LUX_PASSWORD`.
+It receives both official feature flags:
+
+- `UF_IS_ADMIN`
+- `UF_CAN_DEL_HISTORY`
+
+Every enabled account with a password can pull, push, and read function
+history. Administrator and history-deletion flags are independent profile
+attributes. Native deletion additionally requires the global
+`LUX_ALLOW_DELETES=true` setting.
+
+Account rules enforced by the service:
+
+- Usernames are 1–128 bytes and cannot contain control characters, `/`, or `\`.
+- Passwords are 8–72 bytes.
+- License IDs are empty or use `XX-XXXX-XXXX-XX` hexadecimal notation.
+- Email values are optional, limited to 320 bytes, and cannot contain control
+  characters.
+- Accounts without a password cannot authenticate.
+- The final enabled account cannot be disabled or deleted.
+- Password, profile, privilege, disable, and delete operations revoke that
+  account's active sessions immediately.
+- Deleting an account does not remove its historical username attribution.
+
+The management bearer token is separate from native IDA credentials. Account
+and session administration always requires a configured bearer token. Other
+mutations require the token when one is configured.
+
+## Native protocol behavior
+
+Lux implements the native packet framing and positional encoding used by the
+public Lumina SDK:
+
+```text
+┌──────────────────────┬──────────────┬─────────────────────┐
+│ 4-byte payload length│ 1-byte opcode│ encoded payload ... │
+│ big-endian           │              │                     │
+└──────────────────────┴──────────────┴─────────────────────┘
+```
+
+Supported transactions:
+
+| Transaction | Behavior |
+|---|---|
+| Hello | Requires username and password; versions 3–4 receive `OK`, newer versions receive a full user profile |
+| Pull metadata | Returns the selected record for each known 16-byte function hash |
+| Push metadata | Records the push, stores changed versions, and updates selection according to push mode |
+| Get histories | Returns newest-first immutable records up to `LUX_HISTORY_LIMIT` |
+| Delete history | Removes all stored versions for requested hashes when both privilege and global policy allow it |
+| Get popular | Returns selected functions ordered by observed pull frequency |
+| Get server info | Returns peer, user, session, server-version, start-time, and current-time fields |
+
+Pulls increment the persisted function frequency unless the client sends
+`PULL_MD_SEEN_FILE`. Repeated occurrences of the same hash in one request share
+the same resulting frequency value.
+
+See [Compatibility](docs/COMPATIBILITY.md) for exact status, deliberate
+extensions, and behaviors that still require validation against IDA.
+
+## Metadata and history
+
+Each native push stores:
+
+- The authenticated username, license ID, and email snapshot.
+- The IDA license bytes and client hostname.
+- The input-file path and MD5.
+- The IDB path and protocol version.
+- Submitted and changed function counts.
+- An immutable revision for every changed function.
+
+Lux keeps every contribution while selecting one current record per function
+hash. The default push mode replaces the selected record only when the incoming
+metadata score is higher. Force-override always selects the incoming revision;
+do-not-override selects it only when no record exists. Equal or lower-scoring
+revisions remain available in history.
+
+Metadata is stored losslessly as IDA chunks. Lux decodes and edits the public
+formats for:
+
+- Serialized function types.
+- Decompiler elapsed time.
+- Function and instruction comments.
+- Repeatable comments.
+- Anterior and posterior comments.
+- User-defined stack points.
+
+Frame descriptions, operand representations, malformed chunks, and unknown
+future keys retain their exact payload bytes. Editing another field does not
+discard those opaque chunks.
+
+Administrative edits and restores create new push and revision records instead
+of silently rewriting history.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    IDA["IDA clients"] -->|"native TCP or TLS :1234"| RPC["Lumina service"]
+    Browser["Web browser / API client"] -->|"HTTP :8080"| Web["Management service"]
+    RPC --> Auth["Authentication and policy"]
+    Web --> Auth
+    RPC --> Store["Store and selection logic"]
+    Web --> Store
+    Auth --> PG[("PostgreSQL")]
+    Store --> PG
+    Metrics["Health and Prometheus metrics"] --> Web
+```
+
+The native and management listeners share one process, one PostgreSQL-backed
+store, one authentication service, and one live-session registry. Frontend
+HTML, CSS, and JavaScript are embedded with `go:embed`; no frontend build step
+or external asset server is required.
+
+## Operations
+
+### Health check
+
+`GET /healthz` performs a database-backed statistics query:
+
+```bash
+curl --fail http://127.0.0.1:8080/healthz
+```
 
 ```json
-{
-  "mutations": [
-    {"operation": "set", "index": 1, "text": "reviewed"},
-    {"operation": "append", "code": 99, "payload": "deadbeef"}
-  ]
-}
+{"functions":0,"status":"ok"}
 ```
 
-Structured edits create the same immutable administrative push/revision records as raw edits. History detail responses contain both decoded documents and field-level semantic differences such as `metadata.function_comment`.
+The endpoint returns `503 Service Unavailable` when PostgreSQL cannot answer.
 
-## Native protocol design
+### Metrics
 
-A TCP/TLS listener performs a credential-bearing hello exchange with the full
-Lumina user profile and then handles metadata pull/push, popular-functions,
-server-information, history, and deletion transactions. Packets use a
-four-byte big-endian payload length, one message-code byte, and IDA's compact
-positional encoding. PostgreSQL stores users, input files, IDBs, function
-addresses, pull frequencies, pushes, current metadata selection, and immutable
-history.
+`GET /metrics` exposes:
 
-Native behavior follows the official compatibility matrix. Management features
-that do not exist in the IDA protocol remain isolated HTTP extensions.
+- `lux_active_connections`
+- `lux_connections_total`
+- `lux_pushes_total`
+- `lux_new_functions_total`
+- `lux_pulls_total`
+- `lux_queried_functions_total`
+- `lux_rpc_failures_total`
+- `lux_protocol_connections_total{version="..."}`
 
-### IDA scoring oracle
+### Backup and restore
 
-The exact `ida_lumina.score_metadata()` formula is not public. To capture
-authoritative fixtures from IDA 9.3 or newer, open an IDB and run:
+The Compose stack stores database files in the `postgres-data` volume. Use
+PostgreSQL-native tools for portable backups:
 
-```sh
-ida -A -S"/absolute/path/to/tools/ida/export_lumina_scores.py /tmp/ida-scores.json" sample.i64
+```bash
+docker compose exec -T postgres \
+  pg_dump --clean --if-exists --no-owner --username lux lux > lux.sql
 ```
 
-The exporter records each function's exact metadata bytes and the score
-returned by IDA. See the compatibility document before treating Lux's
-provisional scorer as byte-for-byte compatible.
+Restore into an empty or disposable database:
+
+```bash
+docker compose exec -T postgres \
+  psql --username lux --dbname lux < lux.sql
+```
+
+> [!CAUTION]
+> A restore can overwrite existing database objects. Inspect the target and
+> backup file before running it against a production deployment.
+
+### Upgrades
+
+Build the new image and recreate only the application container:
+
+```bash
+docker compose up --build -d lux
+docker compose logs --tail=100 lux
+curl --fail http://127.0.0.1:8080/healthz
+```
+
+Lux runs idempotent schema migrations before it opens either listener.
 
 ## Development
 
-```sh
+Start the test database:
+
+```bash
 docker compose up -d postgres
 export LUX_TEST_DATABASE_URL='postgres://lux:lux@127.0.0.1:55432/lux?sslmode=disable'
+```
+
+Run the complete suite:
+
+```bash
 make test
 make coverage
 go vet ./...
 go build ./cmd/lux
 ```
 
-Database tests create and remove an isolated PostgreSQL schema per test. They are skipped when `LUX_TEST_DATABASE_URL` is not set; CI always supplies it and enforces at least 90% statement coverage. No frontend build step is necessary because the console assets are embedded with `go:embed`.
+Database tests create isolated PostgreSQL schemas and remove them afterward.
+They skip when `LUX_TEST_DATABASE_URL` is unset. CI always supplies PostgreSQL,
+runs the race detector, enforces at least 90% statement coverage, executes the
+IDA scoring-oracle tests, and builds Lux on Linux, macOS, and Windows.
+
+To capture authoritative metadata-score fixtures from IDA 9.3 or newer:
+
+```bash
+ida -A \
+  -S"/absolute/path/to/tools/ida/export_lumina_scores.py /tmp/ida-scores.json" \
+  sample.i64
+```
+
+The exporter records exact metadata bytes and the score returned by
+`ida_lumina.score_metadata()`. It does not upload the IDB or function bytes.
+
+## Compatibility
+
+Lux follows the public IDA SDK structures and the documented private-server
+behavior. It is not presented as a byte-for-byte clone of every commercial
+server component.
+
+The current compatibility matrix and primary sources are maintained in
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+## Documentation
+
+- [Management API](docs/MANAGEMENT_API.md)
+- [Native compatibility matrix](docs/COMPATIBILITY.md)
+- [Hex-Rays Lumina server guide](https://docs.hex-rays.com/admin-guide/lumina-server)
+- [Hex-Rays client and administration reference](https://docs.hex-rays.com/user-guide/lumina/lc_user_manual)
+- [IDA C++ Lumina SDK](https://cpp.docs.hex-rays.com/lumina_8hpp.html)
+- [IDA Python Lumina API](https://python.docs.hex-rays.com/ida_lumina/index.html)
+
+## License
+
+Lux is released under the [MIT License](LICENSE).

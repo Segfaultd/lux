@@ -34,7 +34,7 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.DatabaseURL, "database-url", env("LUX_DATABASE_URL", "postgres://lux:lux@127.0.0.1:5432/lux?sslmode=disable"), "PostgreSQL connection URL (empty uses PG* environment variables)")
 	fs.StringVar(&cfg.ServerName, "server-name", env("LUX_SERVER_NAME", "lux"), "name displayed to IDA clients")
 	fs.StringVar(&cfg.Username, "username", env("LUX_USERNAME", "guest"), "initial Lumina username, used only when the account table is empty")
-	fs.StringVar(&cfg.Password, "password", env("LUX_PASSWORD", ""), "initial Lumina password, used only when the account table is empty (empty accepts any password)")
+	fs.StringVar(&cfg.Password, "password", env("LUX_PASSWORD", ""), "initial Lumina password, used only when the account table is empty (empty disables login until a password is assigned)")
 	fs.StringVar(&cfg.AdminToken, "admin-token", env("LUX_ADMIN_TOKEN", ""), "token required for management mutations")
 	fs.BoolVar(&cfg.AllowDeletes, "allow-deletes", envBool("LUX_ALLOW_DELETES", false), "allow delete-history RPC and web deletions")
 	fs.UintVar(&cfg.HistoryLimit, "history-limit", envUint("LUX_HISTORY_LIMIT", 50), "maximum histories returned per function (0 disables)")
