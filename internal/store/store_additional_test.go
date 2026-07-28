@@ -144,6 +144,13 @@ func TestStoreValidationAndClosedDatabaseErrors(t *testing.T) {
 		{"list files", func() error { _, err := s.ListFiles(ctx, "", 1, 0); return err }},
 		{"file functions", func() error { _, err := s.FileFunctions(ctx, bytesToHex(md5[:])); return err }},
 		{"files with function", func() error { _, err := s.FilesWithFunction(ctx, bytesToHex(hash)); return err }},
+		{"list projects", func() error { _, err := s.ListProjects(ctx, "", 1, 0); return err }},
+		{"project", func() error { _, err := s.Project(ctx, 1); return err }},
+		{"update project", func() error { _, err := s.UpdateProject(ctx, 1, "a", "b"); return err }},
+		{"delete project", func() error { _, err := s.DeleteProject(ctx, 1); return err }},
+		{"function version", func() error { _, err := s.FunctionVersion(ctx, 1); return err }},
+		{"update function version", func() error { _, err := s.UpdateFunctionVersion(ctx, 1, "a", 1, nil); return err }},
+		{"delete function version", func() error { _, err := s.DeleteFunctionVersion(ctx, 1); return err }},
 	}
 	for _, test := range errorCalls {
 		t.Run(test.name, func(t *testing.T) {

@@ -38,6 +38,7 @@ type FunctionSummary struct {
 
 type FunctionVersion struct {
 	ID        int64              `json:"id"`
+	ProjectID int64              `json:"project_id"`
 	Hash      string             `json:"hash"`
 	Name      string             `json:"name"`
 	Length    uint32             `json:"length"`
@@ -397,7 +398,7 @@ func (s *Store) Function(ctx context.Context, hash string) ([]FunctionVersion, e
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT fn.id, encode(fn.checksum, 'hex'), fn.name, fn.length, fn.score, fn.metadata,
+SELECT fn.id, db.id, encode(fn.checksum, 'hex'), fn.name, fn.length, fn.score, fn.metadata,
        encode(fi.checksum, 'hex'), db.file_path, db.idb_path, u.hostname,
        COALESCE(NULLIF(db.auth_username, ''), a.username, ''),
        fn.pushed_at, fn.updated_at
@@ -417,7 +418,7 @@ ORDER BY fn.score DESC, fn.updated_at DESC, fn.id DESC`, raw)
 		var f FunctionVersion
 		var md []byte
 		var pushedAt, updatedAt time.Time
-		if err := rows.Scan(&f.ID, &f.Hash, &f.Name, &f.Length, &f.Score, &md,
+		if err := rows.Scan(&f.ID, &f.ProjectID, &f.Hash, &f.Name, &f.Length, &f.Score, &md,
 			&f.FileMD5, &f.FilePath, &f.IDBPath, &f.Hostname, &f.Username, &pushedAt, &updatedAt); err != nil {
 			return nil, err
 		}

@@ -2,7 +2,9 @@ package web
 
 import (
 	"crypto/subtle"
+	"database/sql"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +46,13 @@ func New(cfg config.Config, store *store.Store, metrics *observability.Metrics, 
 	mux.HandleFunc("DELETE /api/v1/functions/{hash}", s.deleteFunction)
 	mux.HandleFunc("GET /api/v1/files", s.listFiles)
 	mux.HandleFunc("GET /api/v1/files/{md5}/functions", s.getFileFunctions)
+	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
+	mux.HandleFunc("GET /api/v1/projects/{id}", s.getProject)
+	mux.HandleFunc("PATCH /api/v1/projects/{id}", s.updateProject)
+	mux.HandleFunc("DELETE /api/v1/projects/{id}", s.deleteProject)
+	mux.HandleFunc("GET /api/v1/metadata/{id}", s.getMetadata)
+	mux.HandleFunc("PATCH /api/v1/metadata/{id}", s.updateMetadata)
+	mux.HandleFunc("DELETE /api/v1/metadata/{id}", s.deleteMetadata)
 	mux.HandleFunc("GET /api/v1/accounts", s.listAccounts)
 	mux.HandleFunc("POST /api/v1/accounts", s.createAccount)
 	mux.HandleFunc("PUT /api/v1/accounts/{username}/password", s.setAccountPassword)
@@ -247,13 +256,7 @@ func (s *Server) getFunction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteFunction(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.AllowDeletes {
-		writeError(w, http.StatusForbidden, "deletions are disabled")
-		return
-	}
-	if !s.authorized(r) {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="lux management"`)
-		writeError(w, http.StatusUnauthorized, "valid admin token required")
+	if !s.requireDeletion(w, r) {
 		return
 	}
 	hash := r.PathValue("hash")
@@ -280,6 +283,192 @@ func (s *Server) deleteFunction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted_versions": deleted})
+}
+
+func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
+	limit, offset := pagination(r)
+	projects, err := s.store.ListProjects(r.Context(), r.URL.Query().Get("q"), limit, offset)
+	if err != nil {
+		s.internalError(w, "list projects", err)
+		return
+	}
+	if projects == nil {
+		projects = []store.ProjectSummary{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": projects, "limit": limit, "offset": offset})
+}
+
+func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	project, err := s.store.Project(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, "get project", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, project)
+}
+
+func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		FilePath *string `json:"file_path"`
+		IDBPath  *string `json:"idb_path"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if request.FilePath == nil && request.IDBPath == nil {
+		writeError(w, http.StatusBadRequest, "file_path or idb_path is required")
+		return
+	}
+	current, err := s.store.Project(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, "get project for update", err)
+		return
+	}
+	filePath, idbPath := current.FilePath, current.IDBPath
+	if request.FilePath != nil {
+		filePath = *request.FilePath
+	}
+	if request.IDBPath != nil {
+		idbPath = *request.IDBPath
+	}
+	project, err := s.store.UpdateProject(r.Context(), id, filePath, idbPath)
+	if err != nil {
+		s.internalError(w, "update project", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, project)
+}
+
+func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeletion(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	result, err := s.store.DeleteProject(r.Context(), id)
+	if err != nil {
+		s.internalError(w, "delete project", err)
+		return
+	}
+	if !result.Found {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) getMetadata(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	version, err := s.store.FunctionVersion(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "metadata version not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, "get metadata version", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, version)
+}
+
+func (s *Server) updateMetadata(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Name     *string `json:"name"`
+		Length   *uint32 `json:"length"`
+		Metadata *string `json:"metadata"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if request.Name == nil && request.Length == nil && request.Metadata == nil {
+		writeError(w, http.StatusBadRequest, "name, length, or metadata is required")
+		return
+	}
+	current, err := s.store.FunctionVersion(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "metadata version not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, "get metadata version for update", err)
+		return
+	}
+	name, length := current.Name, current.Length
+	rawMetadata, err := hex.DecodeString(current.Metadata)
+	if err != nil {
+		s.internalError(w, "decode stored metadata", err)
+		return
+	}
+	if request.Name != nil {
+		name = *request.Name
+	}
+	if request.Length != nil {
+		length = *request.Length
+	}
+	if request.Metadata != nil {
+		rawMetadata, err = hex.DecodeString(strings.TrimSpace(*request.Metadata))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "metadata must be hexadecimal")
+			return
+		}
+	}
+	version, err := s.store.UpdateFunctionVersion(r.Context(), id, name, length, rawMetadata)
+	if err != nil {
+		s.internalError(w, "update metadata version", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, version)
+}
+
+func (s *Server) deleteMetadata(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeletion(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	result, err := s.store.DeleteFunctionVersion(r.Context(), id)
+	if err != nil {
+		s.internalError(w, "delete metadata version", err)
+		return
+	}
+	if !result.Found {
+		writeError(w, http.StatusNotFound, "metadata version not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
@@ -397,6 +586,32 @@ func (s *Server) authorized(r *http.Request) bool {
 	}
 	value = strings.TrimSpace(value)
 	return subtle.ConstantTimeCompare([]byte(value), []byte(s.cfg.AdminToken)) == 1
+}
+
+func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if s.authorized(r) {
+		return true
+	}
+	w.Header().Set("WWW-Authenticate", `Bearer realm="lux management"`)
+	writeError(w, http.StatusUnauthorized, "valid admin token required")
+	return false
+}
+
+func (s *Server) requireDeletion(w http.ResponseWriter, r *http.Request) bool {
+	if !s.cfg.AllowDeletes {
+		writeError(w, http.StatusForbidden, "deletions are disabled")
+		return false
+	}
+	return s.requireAdmin(w, r)
+}
+
+func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, "id must be a positive integer")
+		return 0, false
+	}
+	return id, true
 }
 
 func isHashError(err error) bool {
