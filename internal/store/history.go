@@ -12,21 +12,33 @@ import (
 )
 
 type PushFilter struct {
-	Search    string
-	Username  string
-	ProjectID int64
-	From      *time.Time
-	To        *time.Time
+	Search        string
+	Username      string
+	LicenseID     string
+	ProjectID     int64
+	From          *time.Time
+	To            *time.Time
+	Chronological bool
 }
 
 type HistoryFilter struct {
-	Search    string
-	Username  string
-	Hash      string
-	ProjectID int64
-	PushID    int64
-	From      *time.Time
-	To        *time.Time
+	Search        string
+	Username      string
+	LicenseID     string
+	Name          string
+	Hash          string
+	IDBPath       string
+	FilePath      string
+	FileMD5       string
+	ProjectID     int64
+	PushID        int64
+	HistoryIDFrom int64
+	HistoryIDTo   int64
+	PushIDFrom    int64
+	PushIDTo      int64
+	From          *time.Time
+	To            *time.Time
+	Chronological bool
 }
 
 type PushSummary struct {
@@ -35,6 +47,9 @@ type PushSummary struct {
 	ProtocolVersion    uint32 `json:"protocol_version"`
 	Source             string `json:"source"`
 	Username           string `json:"username"`
+	LicenseID          string `json:"license_id"`
+	LicenseName        string `json:"license_name"`
+	LicenseEmail       string `json:"license_email"`
 	Hostname           string `json:"hostname"`
 	IDBPath            string `json:"idb_path"`
 	FilePath           string `json:"file_path"`
@@ -92,20 +107,27 @@ func (s *Store) ListPushes(ctx context.Context, filter PushFilter, limit, offset
 	limit, offset = normalizePagination(limit, offset)
 	needle := "%" + strings.ToLower(filter.Search) + "%"
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, database_id, protocol_version, source, username, hostname, idb_path,
+SELECT id, database_id, protocol_version, source, username,
+       license_id, license_name, license_email, hostname, idb_path,
        file_path, encode(file_md5, 'hex'), submitted_functions, changed_functions, pushed_at
 FROM pushes
 WHERE ($1='' OR lower(username) LIKE $2 OR lower(hostname) LIKE $2
        OR lower(idb_path) LIKE $2 OR lower(file_path) LIKE $2
        OR encode(file_md5, 'hex') LIKE $2)
   AND ($3='' OR lower(username)=lower($3))
-  AND ($4=0 OR database_id=$4)
-  AND ($5::timestamptz IS NULL OR pushed_at >= $5)
-  AND ($6::timestamptz IS NULL OR pushed_at <= $6)
-ORDER BY pushed_at DESC, id DESC
-LIMIT $7 OFFSET $8`,
-		filter.Search, needle, filter.Username, filter.ProjectID,
-		nullableTime(filter.From), nullableTime(filter.To), limit, offset)
+  AND ($4='' OR lower(license_id)=lower($4))
+  AND ($5=0 OR database_id=$5)
+  AND ($6::timestamptz IS NULL OR pushed_at >= $6)
+  AND ($7::timestamptz IS NULL OR pushed_at <= $7)
+ORDER BY
+  CASE WHEN $8 THEN pushed_at END ASC,
+  CASE WHEN $8 THEN id END ASC,
+  CASE WHEN NOT $8 THEN pushed_at END DESC,
+  CASE WHEN NOT $8 THEN id END DESC
+LIMIT $9 OFFSET $10`,
+		filter.Search, needle, filter.Username, filter.LicenseID, filter.ProjectID,
+		nullableTime(filter.From), nullableTime(filter.To), filter.Chronological,
+		limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +145,8 @@ LIMIT $7 OFFSET $8`,
 
 func (s *Store) PushRecord(ctx context.Context, id int64) (PushDetail, error) {
 	push, err := scanPush(s.db.QueryRowContext(ctx, `
-SELECT id, database_id, protocol_version, source, username, hostname, idb_path,
+SELECT id, database_id, protocol_version, source, username,
+       license_id, license_name, license_email, hostname, idb_path,
        file_path, encode(file_md5, 'hex'), submitted_functions, changed_functions, pushed_at
 FROM pushes WHERE id=$1`, id))
 	if err != nil {
@@ -157,20 +180,42 @@ func (s *Store) ListHistory(ctx context.Context, filter HistoryFilter, limit, of
 	limit, offset = normalizePagination(limit, offset)
 	needle := "%" + strings.ToLower(filter.Search) + "%"
 	hashNeedle := strings.ToLower(strings.TrimSpace(filter.Hash))
+	fileMD5 := strings.ToLower(strings.TrimSpace(filter.FileMD5))
+	nameNeedle := "%" + strings.ToLower(filter.Name) + "%"
+	idbNeedle := "%" + strings.ToLower(filter.IDBPath) + "%"
+	fileNeedle := "%" + strings.ToLower(filter.FilePath) + "%"
 	rows, err := s.db.QueryContext(ctx, historySelect+`
 WHERE ($1='' OR lower(fc.name) LIKE $2 OR encode(fn.checksum, 'hex') LIKE $2
        OR lower(p.username) LIKE $2 OR lower(p.idb_path) LIKE $2
        OR lower(p.file_path) LIKE $2)
   AND ($3='' OR lower(p.username)=lower($3))
-  AND ($4='' OR encode(fn.checksum, 'hex')=$4)
-  AND ($5=0 OR p.database_id=$5)
-  AND ($6=0 OR p.id=$6)
-  AND ($7::timestamptz IS NULL OR fc.changed_at >= $7)
-  AND ($8::timestamptz IS NULL OR fc.changed_at <= $8)
-ORDER BY fc.changed_at DESC, fc.id DESC
-LIMIT $9 OFFSET $10`,
-		filter.Search, needle, filter.Username, hashNeedle, filter.ProjectID, filter.PushID,
-		nullableTime(filter.From), nullableTime(filter.To), limit, offset)
+  AND ($4='' OR lower(p.license_id)=lower($4))
+  AND ($5='' OR lower(fc.name) LIKE $6)
+  AND ($7='' OR encode(fn.checksum, 'hex')=$7)
+  AND ($8='' OR lower(p.idb_path) LIKE $9)
+  AND ($10='' OR lower(p.file_path) LIKE $11)
+  AND ($12='' OR encode(p.file_md5, 'hex')=$12)
+  AND ($13=0 OR p.database_id=$13)
+  AND ($14=0 OR p.id=$14)
+  AND ($15=0 OR fc.id >= $15)
+  AND ($16=0 OR fc.id <= $16)
+  AND ($17=0 OR p.id >= $17)
+  AND ($18=0 OR p.id <= $18)
+  AND ($19::timestamptz IS NULL OR fc.changed_at >= $19)
+  AND ($20::timestamptz IS NULL OR fc.changed_at <= $20)
+ORDER BY
+  CASE WHEN $21 THEN fc.changed_at END ASC,
+  CASE WHEN $21 THEN fc.id END ASC,
+  CASE WHEN NOT $21 THEN fc.changed_at END DESC,
+  CASE WHEN NOT $21 THEN fc.id END DESC
+LIMIT $22 OFFSET $23`,
+		filter.Search, needle, filter.Username, filter.LicenseID,
+		filter.Name, nameNeedle, hashNeedle,
+		filter.IDBPath, idbNeedle, filter.FilePath, fileNeedle, fileMD5,
+		filter.ProjectID, filter.PushID,
+		filter.HistoryIDFrom, filter.HistoryIDTo, filter.PushIDFrom, filter.PushIDTo,
+		nullableTime(filter.From), nullableTime(filter.To), filter.Chronological,
+		limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +411,8 @@ func scanPush(row scanner) (PushSummary, error) {
 	var push PushSummary
 	var pushedAt time.Time
 	err := row.Scan(&push.ID, &push.ProjectID, &push.ProtocolVersion, &push.Source,
-		&push.Username, &push.Hostname, &push.IDBPath, &push.FilePath, &push.FileMD5,
+		&push.Username, &push.LicenseID, &push.LicenseName, &push.LicenseEmail,
+		&push.Hostname, &push.IDBPath, &push.FilePath, &push.FileMD5,
 		&push.SubmittedFunctions, &push.ChangedFunctions, &pushedAt)
 	if err != nil {
 		return PushSummary{}, err
@@ -395,11 +441,14 @@ func scanHistoryChange(row scanner) (HistoryChange, error) {
 func insertAdminPushTx(ctx context.Context, tx *sql.Tx, projectID int64, source string) (int64, error) {
 	return upsertID(ctx, tx, `
 INSERT INTO pushes (
-  database_id, source, username, hostname, idb_path, file_path, file_md5,
+  database_id, source, username, license_id, license_name, license_email,
+  hostname, idb_path, file_path, file_md5,
   submitted_functions, changed_functions
 )
 SELECT db.id, $2, COALESCE(NULLIF(db.auth_username, ''), a.username, ''),
-       u.hostname, db.idb_path, db.file_path, fi.checksum, 1, 1
+       COALESCE(a.license_id, ''), COALESCE(a.username, ''),
+       COALESCE(a.email, ''), u.hostname, db.idb_path, db.file_path,
+       fi.checksum, 1, 1
 FROM databases db
 JOIN users u ON u.id=db.user_id
 JOIN files fi ON fi.id=db.file_id

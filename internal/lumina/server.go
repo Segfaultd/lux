@@ -238,12 +238,14 @@ func (s *Server) handlePacket(
 			}
 		}
 		status, err := s.store.Push(parent, store.PushIdentity{
-			LicenseNumber: hello.LicenseNumber[:],
-			LicenseData:   hello.LicenseData,
-			Hostname:      req.Hostname,
-			AccountID:     principal.ID,
-			Username:      principal.Username,
-			Protocol:      hello.ProtocolVersion,
+			LicenseNumber:    hello.LicenseNumber[:],
+			LicenseData:      hello.LicenseData,
+			Hostname:         req.Hostname,
+			AccountID:        principal.ID,
+			Username:         principal.Username,
+			AccountLicenseID: principal.LicenseID,
+			AccountEmail:     principal.Email,
+			Protocol:         hello.ProtocolVersion,
 		}, req)
 		s.sessions.SetHostname(sessionID, req.Hostname)
 		if err != nil {

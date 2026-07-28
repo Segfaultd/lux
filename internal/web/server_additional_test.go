@@ -55,13 +55,16 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 		status     int
 		bodyPieces []string
 	}{
-		{"index", "/", 200, []string{"Lux administration", "Active Lumina sessions", "Projects / IDBs", "Push and metadata history", "Functions and metadata"}},
+		{"index", "/", 200, []string{"Lux administration", "Per-user statistics", "Active Lumina sessions", "Projects / IDBs", "Push and metadata history", "Functions and metadata"}},
 		{"stylesheet", "/styles.css", 200, []string{".topbar", ".version", ".history-filter", ".metadata-chunk", ".metadata-row"}},
 		{"script", "/app.js", 200, []string{"loadCollection", "loadSessions", "/api/v1/sessions", "/api/v1/projects", "/api/v1/metadata", "/api/v1/history", "openPush", "openMetadataExplorer", "saveStructuredChunk"}},
 		{"health", "/healthz", 200, []string{`"status":"ok"`, `"functions":1`}},
 		{"metrics", "/metrics", 200, []string{"lux_connections_total"}},
 		{"config", "/api/v1/config", 200, []string{`"server_name":"route-test"`, `"tls":true`, `"account_management":false`, `"history_limit":12`}},
 		{"stats", "/api/v1/stats", 200, []string{`"functions":1`, `"versions":1`, `"files":1`}},
+		{"user stats", "/api/v1/stats?username=analyst,missing", 200, []string{`"username":"analyst"`, `"functions":1`, `"username":"missing"`}},
+		{"user stats empty names", "/api/v1/stats?username=,,,", 400, []string{"1-100"}},
+		{"user stats too many names", "/api/v1/stats?username=" + strings.Repeat("x,", 101), 400, []string{"1-100"}},
 		{"functions", "/api/v1/functions?q=known&limit=2&offset=0", 200, []string{"known_function", `"limit":2`}},
 		{"functions default pagination", "/api/v1/functions?limit=900&offset=-5", 200, []string{`"limit":50`, `"offset":0`}},
 		{"function", "/api/v1/functions/" + hash, 200, []string{"known_function", "useful comment"}},
@@ -81,14 +84,20 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 		{"metadata invalid", "/api/v1/metadata/0", 400, []string{"positive integer"}},
 		{"metadata missing", "/api/v1/metadata/999999", 404, []string{"metadata version not found"}},
 		{"pushes", "/api/v1/pushes?q=sample&username=&project_id=" + strconv.FormatInt(projectID, 10), 200, []string{`"source":"native"`, `"changed_functions":1`}},
+		{"pushes official filters", "/api/v1/pushes?license_id=AB-1234-CDEF-90&chronological=true", 200, []string{`"username":"analyst"`, `"license_email":"analyst@example.test"`}},
 		{"push", "/api/v1/pushes/" + strconv.FormatInt(pushes[0].ID, 10), 200, []string{`"changes"`, `"known_function"`}},
 		{"push missing", "/api/v1/pushes/999999", 404, []string{"push not found"}},
 		{"history", "/api/v1/history?q=known&hash=" + hash, 200, []string{`"operation":"create"`, `"known_function"`}},
+		{"history official filters", "/api/v1/history?license_id=AB-1234-CDEF-90&name=known&idb=sample&input=samples&file_md5=" + md5 + "&history_id_from=" + strconv.FormatInt(changes[0].ID, 10) + "&history_id_to=" + strconv.FormatInt(changes[0].ID, 10) + "&push_id_from=" + strconv.FormatInt(pushes[0].ID, 10) + "&push_id_to=" + strconv.FormatInt(pushes[0].ID, 10) + "&chronological=true", 200, []string{`"known_function"`, `"username":"analyst"`}},
 		{"history diff", "/api/v1/history/" + strconv.FormatInt(changes[0].ID, 10), 200, []string{`"fields"`, `"field":"name"`, `"metadata_document"`, `"metadata.function_comment"`}},
 		{"history missing", "/api/v1/history/999999", 404, []string{"history record not found"}},
 		{"history bad hash", "/api/v1/history?hash=bad", 400, []string{"exactly 32"}},
+		{"history bad file hash", "/api/v1/history?file_md5=bad", 400, []string{"file_md5"}},
+		{"push bad chronological", "/api/v1/pushes?chronological=sometimes", 400, []string{"true or false"}},
 		{"push bad project", "/api/v1/pushes?project_id=nope", 400, []string{"positive integer"}},
 		{"history bad push", "/api/v1/history?push_id=0", 400, []string{"positive integer"}},
+		{"history reversed id range", "/api/v1/history?history_id_from=2&history_id_to=1", 400, []string{"must not exceed"}},
+		{"history reversed push range", "/api/v1/history?push_id_from=2&push_id_to=1", 400, []string{"must not exceed"}},
 		{"history bad from", "/api/v1/history?from=yesterday", 400, []string{"RFC3339"}},
 		{"history reversed range", "/api/v1/history?from=2026-07-28T12%3A00%3A00Z&to=2026-07-27T12%3A00%3A00Z", 400, []string{"must not be later"}},
 		{"legacy file", "/api/files/" + md5, 200, []string{`"len":64`, `"name":"known_function"`}},
@@ -578,7 +587,7 @@ func TestSessionManagementAPI(t *testing.T) {
 		t.Fatal("terminated client remained connected")
 	}
 
-	response = accountRequest(t, server, http.MethodDelete, "/api/v1/accounts/READER/sessions", "", "secret")
+	response = accountRequest(t, server, http.MethodDelete, "/api/v1/accounts/REGULAR/sessions", "", "secret")
 	body, _ = io.ReadAll(response.Body)
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"terminated":1`) {
@@ -795,6 +804,7 @@ func TestManagementDatabaseFailures(t *testing.T) {
 	}{
 		{"/healthz", http.StatusServiceUnavailable},
 		{"/api/v1/stats", http.StatusInternalServerError},
+		{"/api/v1/stats?username=analyst", http.StatusInternalServerError},
 		{"/api/v1/functions", http.StatusInternalServerError},
 		{"/api/v1/functions/" + hash, http.StatusInternalServerError},
 		{"/api/v1/files", http.StatusInternalServerError},
@@ -873,7 +883,9 @@ func populatedWebStore(t *testing.T) (*store.Store, string, string) {
 	metadata.DD(3)
 	metadata.Bytes([]byte("useful comment"))
 	_, err = db.Push(context.Background(), store.PushIdentity{
-		LicenseNumber: []byte{1, 2, 3, 4, 5, 6}, LicenseData: []byte("license"), Hostname: "host",
+		LicenseNumber: []byte{1, 2, 3, 4, 5, 6}, LicenseData: []byte("license"),
+		Hostname: "host", Username: "analyst",
+		AccountLicenseID: "AB-1234-CDEF-90", AccountEmail: "analyst@example.test",
 	}, protocol.PushMetadata{
 		IDBPath: "sample.i64", FilePath: "/samples/sample.bin", MD5: md5Bytes, Hostname: "host",
 		Funcs: []protocol.PushFunction{{

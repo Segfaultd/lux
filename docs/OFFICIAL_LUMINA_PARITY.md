@@ -32,7 +32,7 @@ is not a behavioral specification for Lux.
 | Popular-functions RPC (`PKT_GET_POP`) | Implemented |
 | Server-information RPC (`PKT_GET_LUMINA_INFO`) | Implemented |
 | Regular users plus `UF_IS_ADMIN` and `UF_CAN_DEL_HISTORY` flags | Implemented |
-| `lc info`, users, statistics, history, and session administration behavior | Exposed through the management API and console |
+| `lc info`, users, per-user statistics, history filters, and session administration behavior | Exposed through the management API and console |
 | Wire-compatible `lc` administration protocol | Not yet implemented |
 | Teams/Vault delegated identity | Not implemented |
 | Telemetry and decompiler features | Not implemented |

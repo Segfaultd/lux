@@ -98,7 +98,7 @@ IDA pins the Lumina server certificate. Copy the public certificate to `hexrays.
 |---|---|---|
 | `GET` | `/healthz` | Database-backed liveness check |
 | `GET` | `/metrics` | Prometheus metrics |
-| `GET` | `/api/v1/stats` | Aggregate counts |
+| `GET` | `/api/v1/stats?username=alice,bob` | Aggregate counts or official per-user statistics |
 | `GET` | `/api/v1/functions?q=` | Search best function records |
 | `GET` | `/api/v1/functions/{hash}` | Inspect all stored versions |
 | `DELETE` | `/api/v1/functions/{hash}` | Delete all versions |
@@ -130,7 +130,14 @@ IDA pins the Lumina server certificate. Copy the public certificate to `hexrays.
 
 Deletion must be enabled with `LUX_ALLOW_DELETES=true`. Account management always requires a configured admin token, and all other mutations require it when configured. Send `Authorization: Bearer <token>`; the browser console keeps it only in session storage.
 
-Push and history searches accept `q`, `username`, `project_id`, `from`, and `to`. History additionally accepts `hash` and `push_id`. Timestamps use RFC3339. Native pushes are recorded even when they contain no changed functions; only actual metadata changes create revisions. Restoring a revision creates a new auditable revision instead of rewriting history.
+Push searches accept `q`, `username`, `license_id`, `project_id`, `from`, `to`,
+and `chronological`. History additionally accepts `name`, `hash`, `idb`,
+`input`, `file_md5`, `push_id`, `history_id_from`, `history_id_to`,
+`push_id_from`, and `push_id_to`. Timestamps use RFC3339. These correspond to
+the official `lc hist pushes` and `lc hist show` filters. Native pushes snapshot
+the account's license ID, name, and email even when they contain no changed
+functions; only actual metadata changes create revisions. Restoring a revision
+creates a new auditable revision instead of rewriting history.
 
 Legacy compatibility aliases are available at `GET /api/files/{md5}` and `GET /api/funcs/{hash}`. They are Lux extensions and are not part of the native Lumina protocol.
 

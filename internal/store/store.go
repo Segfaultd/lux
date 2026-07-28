@@ -32,6 +32,15 @@ type Stats struct {
 	HistoryRecords int64 `json:"history_records"`
 }
 
+type UserStats struct {
+	Username       string `json:"username"`
+	Functions      int64  `json:"functions"`
+	Pushes         int64  `json:"pushes"`
+	HistoryRecords int64  `json:"history_records"`
+	Databases      int64  `json:"databases"`
+	Files          int64  `json:"files"`
+}
+
 type FunctionSummary struct {
 	Hash       string `json:"hash"`
 	Name       string `json:"name"`
@@ -67,12 +76,14 @@ type FileSummary struct {
 }
 
 type PushIdentity struct {
-	LicenseNumber []byte
-	LicenseData   []byte
-	Hostname      string
-	AccountID     int64
-	Username      string
-	Protocol      uint32
+	LicenseNumber    []byte
+	LicenseData      []byte
+	Hostname         string
+	AccountID        int64
+	Username         string
+	AccountLicenseID string
+	AccountEmail     string
+	Protocol         uint32
 }
 
 type AuthAccount struct {
@@ -221,6 +232,9 @@ CREATE TABLE IF NOT EXISTS pushes (
   protocol_version INTEGER NOT NULL DEFAULT 0,
   source TEXT NOT NULL DEFAULT 'native',
   username TEXT NOT NULL DEFAULT '',
+  license_id TEXT NOT NULL DEFAULT '',
+  license_name TEXT NOT NULL DEFAULT '',
+  license_email TEXT NOT NULL DEFAULT '',
   hostname TEXT NOT NULL DEFAULT '',
   idb_path TEXT NOT NULL DEFAULT '',
   file_path TEXT NOT NULL DEFAULT '',
@@ -230,6 +244,9 @@ CREATE TABLE IF NOT EXISTS pushes (
   pushed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ALTER TABLE pushes ADD COLUMN IF NOT EXISTS username TEXT NOT NULL DEFAULT '';
+ALTER TABLE pushes ADD COLUMN IF NOT EXISTS license_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE pushes ADD COLUMN IF NOT EXISTS license_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE pushes ADD COLUMN IF NOT EXISTS license_email TEXT NOT NULL DEFAULT '';
 ALTER TABLE pushes ADD COLUMN IF NOT EXISTS hostname TEXT NOT NULL DEFAULT '';
 ALTER TABLE pushes ADD COLUMN IF NOT EXISTS idb_path TEXT NOT NULL DEFAULT '';
 ALTER TABLE pushes ADD COLUMN IF NOT EXISTS file_path TEXT NOT NULL DEFAULT '';
@@ -252,10 +269,12 @@ CREATE INDEX IF NOT EXISTS idx_function_changes_function ON function_changes(fun
 CREATE INDEX IF NOT EXISTS idx_function_changes_push ON function_changes(push_id);
 CREATE INDEX IF NOT EXISTS idx_function_changes_accepted ON function_changes(accepted, score DESC, id);
 INSERT INTO pushes (
-  database_id, source, username, hostname, idb_path, file_path, file_md5,
+  database_id, source, username, license_id, license_name, license_email,
+  hostname, idb_path, file_path, file_md5,
   submitted_functions, changed_functions, pushed_at
 )
 SELECT db.id, 'backfill', COALESCE(NULLIF(db.auth_username, ''), a.username, ''),
+       COALESCE(a.license_id, ''), COALESCE(a.username, ''), COALESCE(a.email, ''),
        u.hostname, db.idb_path, db.file_path, fi.checksum,
        COUNT(fn.id), COUNT(fn.id), MIN(fn.pushed_at)
 FROM databases db
@@ -264,9 +283,12 @@ JOIN users u ON u.id=db.user_id
 JOIN files fi ON fi.id=db.file_id
 LEFT JOIN auth_accounts a ON a.id=db.auth_account_id
 WHERE NOT EXISTS (SELECT 1 FROM pushes p WHERE p.database_id=db.id)
-GROUP BY db.id, a.username, u.hostname, fi.checksum;
+GROUP BY db.id, a.username, a.license_id, a.email, u.hostname, fi.checksum;
 UPDATE pushes p SET
   username=COALESCE(NULLIF(db.auth_username, ''), a.username, ''),
+  license_id=COALESCE(NULLIF(p.license_id, ''), a.license_id, ''),
+  license_name=COALESCE(NULLIF(p.license_name, ''), a.username, ''),
+  license_email=COALESCE(NULLIF(p.license_email, ''), a.email, ''),
   hostname=u.hostname,
   idb_path=db.idb_path,
   file_path=db.file_path,
@@ -276,6 +298,14 @@ JOIN users u ON u.id=db.user_id
 JOIN files fi ON fi.id=db.file_id
 LEFT JOIN auth_accounts a ON a.id=db.auth_account_id
 WHERE p.database_id=db.id AND p.file_md5='\x';
+UPDATE pushes p SET
+  license_id=COALESCE(a.license_id, ''),
+  license_name=COALESCE(a.username, p.username),
+  license_email=COALESCE(a.email, '')
+FROM databases db
+LEFT JOIN auth_accounts a ON a.id=db.auth_account_id
+WHERE p.database_id=db.id
+  AND p.license_id='' AND p.license_name='' AND p.license_email='';
 INSERT INTO function_changes (push_id, function_id, name, length, metadata, score, operation, changed_at)
 SELECT p.id, fn.id, fn.name, fn.length, fn.metadata, fn.score, 'backfill', fn.updated_at
 FROM functions fn
@@ -328,6 +358,35 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		}
 	}
 	return out, nil
+}
+
+func (s *Store) StatsForUsers(ctx context.Context, usernames []string) ([]UserStats, error) {
+	const query = `
+SELECT
+  (SELECT COUNT(DISTINCT fn.checksum)
+   FROM functions fn
+   JOIN databases db ON db.id=fn.database_id
+   WHERE lower(db.auth_username)=lower($1)),
+  (SELECT COUNT(*) FROM pushes p WHERE lower(p.username)=lower($1)),
+  (SELECT COUNT(*)
+   FROM function_changes fc
+   JOIN pushes p ON p.id=fc.push_id
+   WHERE lower(p.username)=lower($1)),
+  (SELECT COUNT(*) FROM databases db WHERE lower(db.auth_username)=lower($1)),
+  (SELECT COUNT(DISTINCT db.file_id)
+   FROM databases db WHERE lower(db.auth_username)=lower($1))`
+	stats := make([]UserStats, 0, len(usernames))
+	for _, username := range usernames {
+		current := UserStats{Username: username}
+		if err := s.db.QueryRowContext(ctx, query, username).Scan(
+			&current.Functions, &current.Pushes, &current.HistoryRecords,
+			&current.Databases, &current.Files,
+		); err != nil {
+			return nil, err
+		}
+		stats = append(stats, current)
+	}
+	return stats, nil
 }
 
 func (s *Store) Pull(ctx context.Context, hashes [][]byte) ([]*protocol.PullResultFunction, error) {
@@ -436,11 +495,14 @@ RETURNING id`, request.FilePath, request.IDBPath, fileID, userID, nullableID(ide
 	}
 	pushID, err := upsertID(ctx, tx, `
 INSERT INTO pushes (
-  database_id, protocol_version, source, username, hostname, idb_path, file_path, file_md5,
+  database_id, protocol_version, source, username,
+  license_id, license_name, license_email,
+  hostname, idb_path, file_path, file_md5,
   submitted_functions
 )
-VALUES ($1, $2, 'native', $3, $4, $5, $6, $7, $8)
-RETURNING id`, databaseID, identity.Protocol, identity.Username, identity.Hostname,
+VALUES ($1, $2, 'native', $3, $4, $5, $6, $7, $8, $9, $10, $11)
+RETURNING id`, databaseID, identity.Protocol, identity.Username,
+		identity.AccountLicenseID, identity.Username, identity.AccountEmail, identity.Hostname,
 		request.IDBPath, request.FilePath, request.MD5[:], len(request.Funcs))
 	if err != nil {
 		return nil, err
@@ -650,6 +712,7 @@ func (s *Store) DeleteHashes(ctx context.Context, hashes [][]byte) (int64, error
 		deleted += n
 	}
 	cleanup := []string{
+		"DELETE FROM function_frequencies WHERE NOT EXISTS (SELECT 1 FROM functions WHERE checksum=function_frequencies.checksum)",
 		"DELETE FROM databases WHERE NOT EXISTS (SELECT 1 FROM functions WHERE database_id=databases.id)",
 		"DELETE FROM files WHERE NOT EXISTS (SELECT 1 FROM databases WHERE file_id=files.id)",
 		"DELETE FROM users WHERE NOT EXISTS (SELECT 1 FROM databases WHERE user_id=users.id)",

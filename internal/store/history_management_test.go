@@ -29,7 +29,9 @@ func TestHistoryQueriesDiffRestoreAndDelete(t *testing.T) {
 	}
 	identity := PushIdentity{
 		LicenseNumber: []byte("license"), LicenseData: []byte("data"),
-		Hostname: "audit-host", Username: "auditor", Protocol: 5,
+		Hostname: "audit-host", Username: "auditor",
+		AccountLicenseID: "AA-1234-CDEF-90", AccountEmail: "auditor@example.test",
+		Protocol: 5,
 	}
 	for index, name := range []string{"revision_one", "revision_two", "revision_three"} {
 		request.Funcs[0].Name = name
@@ -54,8 +56,17 @@ func TestHistoryQueriesDiffRestoreAndDelete(t *testing.T) {
 		t.Fatalf("pushes = %#v, %v", pushes, err)
 	}
 	if pushes[0].ProtocolVersion != 5 || pushes[0].FileMD5 != bytesToHex(request.MD5[:]) ||
-		pushes[0].ChangedFunctions != 1 {
+		pushes[0].ChangedFunctions != 1 || pushes[0].LicenseID != "AA-1234-CDEF-90" ||
+		pushes[0].LicenseName != "auditor" ||
+		pushes[0].LicenseEmail != "auditor@example.test" {
 		t.Fatalf("push summary = %#v", pushes[0])
+	}
+	chronologicalPushes, err := s.ListPushes(ctx, PushFilter{
+		Username: "auditor", LicenseID: "aa-1234-cdef-90", Chronological: true,
+	}, 10, 0)
+	if err != nil || len(chronologicalPushes) != 3 ||
+		chronologicalPushes[0].ID >= chronologicalPushes[2].ID {
+		t.Fatalf("chronological pushes = %#v, %v", chronologicalPushes, err)
 	}
 	push, err := s.PushRecord(ctx, pushes[1].ID)
 	if err != nil || len(push.Changes) != 1 || push.Changes[0].Name != "revision_two" {
@@ -71,6 +82,26 @@ func TestHistoryQueriesDiffRestoreAndDelete(t *testing.T) {
 	}
 	if changes[0].Name != "revision_three" || changes[2].Operation != "create" {
 		t.Fatalf("history order = %#v", changes)
+	}
+	chronologicalChanges, err := s.ListHistory(ctx, HistoryFilter{
+		Username: "auditor", LicenseID: "aa-1234-cdef-90", Name: "REVISION",
+		Hash: bytesToHex(hash), IDBPath: "AUDIT", FilePath: "SAMPLES",
+		FileMD5: bytesToHex(request.MD5[:]), ProjectID: projectID,
+		HistoryIDFrom: changes[2].ID, HistoryIDTo: changes[0].ID,
+		PushIDFrom: pushes[2].ID, PushIDTo: pushes[0].ID,
+		From: &past, To: &future, Chronological: true,
+	}, 10, 0)
+	if err != nil || len(chronologicalChanges) != 3 ||
+		chronologicalChanges[0].Name != "revision_one" ||
+		chronologicalChanges[2].Name != "revision_three" {
+		t.Fatalf("fully filtered history = %#v, %v", chronologicalChanges, err)
+	}
+	userStats, err := s.StatsForUsers(ctx, []string{"auditor", "missing"})
+	if err != nil || len(userStats) != 2 ||
+		userStats[0].Functions != 1 || userStats[0].Pushes != 3 ||
+		userStats[0].HistoryRecords != 3 || userStats[0].Databases != 1 ||
+		userStats[0].Files != 1 || userStats[1].Pushes != 0 {
+		t.Fatalf("user statistics = %#v, %v", userStats, err)
 	}
 	pushChanges, err := s.ListHistory(ctx, HistoryFilter{PushID: pushes[1].ID}, 10, 0)
 	if err != nil || len(pushChanges) != 1 || pushChanges[0].Name != "revision_two" {

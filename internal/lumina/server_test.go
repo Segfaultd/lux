@@ -53,7 +53,7 @@ func TestHelloPushPullRoundTrip(t *testing.T) {
 	hello.Fixed([]byte{1, 2, 3, 4, 5, 6})
 	hello.DD(0)
 	hello.CString("guest")
-	hello.CString("anything")
+	hello.CString("test password")
 	if err := protocol.WritePacket(conn, protocol.CodeHello, hello.Payload()); err != nil {
 		t.Fatal(err)
 	}

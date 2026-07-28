@@ -145,6 +145,7 @@ func TestStoreValidationAndClosedDatabaseErrors(t *testing.T) {
 		call func() error
 	}{
 		{"stats", func() error { _, err := s.Stats(ctx); return err }},
+		{"user stats", func() error { _, err := s.StatsForUsers(ctx, []string{"user"}); return err }},
 		{"pull", func() error { _, err := s.Pull(ctx, [][]byte{hash}); return err }},
 		{"popular functions", func() error { _, err := s.PopularFunctions(ctx, 10); return err }},
 		{"push", func() error { _, err := s.Push(ctx, identity, push); return err }},
@@ -261,7 +262,7 @@ func TestPushSeparatesAuthenticationAccountsForTheSameIDB(t *testing.T) {
 	}
 	identity.AccountID, identity.Username = bob.ID, bob.Username
 	status, err = s.Push(ctx, identity, request)
-	if err != nil || len(status) != 1 || status[0] != 1 {
+	if err != nil || len(status) != 1 || status[0] != 0 {
 		t.Fatalf("bob push %v: %v", status, err)
 	}
 	versions, err := s.Function(ctx, bytesToHex(hash))

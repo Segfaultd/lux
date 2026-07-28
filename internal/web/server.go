@@ -345,6 +345,26 @@ func (s *Server) writeAuthError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) getStats(w http.ResponseWriter, r *http.Request) {
+	if rawUsers := strings.TrimSpace(r.URL.Query().Get("username")); rawUsers != "" {
+		var usernames []string
+		for _, username := range strings.Split(rawUsers, ",") {
+			username = strings.TrimSpace(username)
+			if username != "" {
+				usernames = append(usernames, username)
+			}
+		}
+		if len(usernames) == 0 || len(usernames) > 100 {
+			writeError(w, http.StatusBadRequest, "username must contain 1-100 comma-separated names")
+			return
+		}
+		stats, err := s.store.StatsForUsers(r.Context(), usernames)
+		if err != nil {
+			s.internalError(w, "load user statistics", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": stats})
+		return
+	}
 	stats, err := s.store.Stats(r.Context())
 	if err != nil {
 		s.internalError(w, "load stats", err)
@@ -682,9 +702,14 @@ func (s *Server) listPushes(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	chronological, ok := optionalQueryBool(w, r, "chronological")
+	if !ok {
+		return
+	}
 	pushes, err := s.store.ListPushes(r.Context(), store.PushFilter{
 		Search: r.URL.Query().Get("q"), Username: r.URL.Query().Get("username"),
-		ProjectID: projectID, From: from, To: to,
+		LicenseID: r.URL.Query().Get("license_id"),
+		ProjectID: projectID, From: from, To: to, Chronological: chronological,
 	}, limit, offset)
 	if err != nil {
 		s.internalError(w, "list pushes", err)
@@ -747,6 +772,34 @@ func (s *Server) listHistory(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	historyIDFrom, ok := optionalQueryID(w, r, "history_id_from")
+	if !ok {
+		return
+	}
+	historyIDTo, ok := optionalQueryID(w, r, "history_id_to")
+	if !ok {
+		return
+	}
+	pushIDFrom, ok := optionalQueryID(w, r, "push_id_from")
+	if !ok {
+		return
+	}
+	pushIDTo, ok := optionalQueryID(w, r, "push_id_to")
+	if !ok {
+		return
+	}
+	if historyIDFrom != 0 && historyIDTo != 0 && historyIDFrom > historyIDTo {
+		writeError(w, http.StatusBadRequest, "history_id_from must not exceed history_id_to")
+		return
+	}
+	if pushIDFrom != 0 && pushIDTo != 0 && pushIDFrom > pushIDTo {
+		writeError(w, http.StatusBadRequest, "push_id_from must not exceed push_id_to")
+		return
+	}
+	chronological, ok := optionalQueryBool(w, r, "chronological")
+	if !ok {
+		return
+	}
 	hash := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("hash")))
 	if hash != "" {
 		raw, err := hex.DecodeString(hash)
@@ -755,9 +808,22 @@ func (s *Server) listHistory(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	fileMD5 := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("file_md5")))
+	if fileMD5 != "" {
+		raw, err := hex.DecodeString(fileMD5)
+		if err != nil || len(raw) != 16 {
+			writeError(w, http.StatusBadRequest, "file_md5 must contain exactly 32 hexadecimal characters")
+			return
+		}
+	}
 	changes, err := s.store.ListHistory(r.Context(), store.HistoryFilter{
 		Search: r.URL.Query().Get("q"), Username: r.URL.Query().Get("username"), Hash: hash,
-		ProjectID: projectID, PushID: pushID, From: from, To: to,
+		LicenseID: r.URL.Query().Get("license_id"), Name: r.URL.Query().Get("name"),
+		IDBPath: r.URL.Query().Get("idb"), FilePath: r.URL.Query().Get("input"),
+		FileMD5: fileMD5, ProjectID: projectID, PushID: pushID,
+		HistoryIDFrom: historyIDFrom, HistoryIDTo: historyIDTo,
+		PushIDFrom: pushIDFrom, PushIDTo: pushIDTo,
+		From: from, To: to, Chronological: chronological,
 	}, limit, offset)
 	if err != nil {
 		s.internalError(w, "list history", err)
@@ -1001,6 +1067,19 @@ func optionalQueryID(w http.ResponseWriter, r *http.Request, name string) (int64
 		return 0, false
 	}
 	return id, true
+}
+
+func optionalQueryBool(w http.ResponseWriter, r *http.Request, name string) (bool, bool) {
+	value := strings.TrimSpace(r.URL.Query().Get(name))
+	if value == "" {
+		return false, true
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, name+" must be true or false")
+		return false, false
+	}
+	return parsed, true
 }
 
 func timeRange(w http.ResponseWriter, r *http.Request) (*time.Time, *time.Time, bool) {

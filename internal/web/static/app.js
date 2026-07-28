@@ -94,6 +94,25 @@ function renderStats(stats) {
     `<div><strong>${number.format(value)}</strong><span>${esc(label)}</span></div>`).join("");
 }
 
+async function loadUserStats(event) {
+  event.preventDefault();
+  const usernames = String(new FormData(event.target).get("username") || "").trim();
+  const table = $("user-stats-table");
+  table.innerHTML = '<tr><td colspan="6">Loading…</td></tr>';
+  try {
+    const data = await api(`/api/v1/stats?username=${encodeURIComponent(usernames)}`);
+    table.innerHTML = data.items.length ? data.items.map((stats) => `
+      <tr><td><strong>${esc(stats.username)}</strong></td>
+        <td>${number.format(stats.functions)}</td><td>${number.format(stats.pushes)}</td>
+        <td>${number.format(stats.history_records)}</td><td>${number.format(stats.databases)}</td>
+        <td>${number.format(stats.files)}</td></tr>`).join("") :
+      '<tr><td colspan="6">No matching users.</td></tr>';
+  } catch (error) {
+    table.innerHTML = `<tr><td colspan="6">${esc(error.message)}</td></tr>`;
+    handleError(error);
+  }
+}
+
 function configRows(config) {
   return [
     ["Server name", config.server_name],
@@ -329,12 +348,15 @@ function historyParams() {
     limit: state.limit,
     offset: state.history.page * state.limit,
   });
-  for (const name of ["q", "username", "project_id"]) {
+  for (const name of ["q", "username", "license_id", "project_id", "chronological"]) {
     const value = String(form.get(name) || "").trim();
     if (value) params.set(name, value);
   }
   if (state.history.view === "history") {
-    for (const name of ["hash", "push_id"]) {
+    for (const name of [
+      "name", "hash", "idb", "input", "file_md5", "push_id",
+      "history_id_from", "history_id_to", "push_id_from", "push_id_to",
+    ]) {
       const value = String(form.get(name) || "").trim();
       if (value) params.set(name, value);
     }
@@ -909,6 +931,7 @@ $("admin-lock").addEventListener("click", () => {
   updateLockState();
   notify("Admin token removed.");
 });
+$("user-stats-filter").addEventListener("submit", loadUserStats);
 $("account-create").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
