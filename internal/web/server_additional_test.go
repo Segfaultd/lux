@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,6 +21,16 @@ import (
 
 func TestEveryReadOnlyManagementRoute(t *testing.T) {
 	db, hash, md5 := populatedWebStore(t)
+	projects, err := db.ListProjects(context.Background(), "", 10, 0)
+	if err != nil || len(projects) != 1 {
+		t.Fatalf("projects: %#v, %v", projects, err)
+	}
+	projectID := projects[0].ID
+	versions, err := db.Function(context.Background(), hash)
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("versions: %#v, %v", versions, err)
+	}
+	versionID := versions[0].ID
 	cfg := config.Config{
 		ServerName: "route-test", LuminaAddr: "127.0.0.1:1234",
 		HistoryLimit: 12, TLSCert: "configured.pem",
@@ -33,9 +44,9 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 		status     int
 		bodyPieces []string
 	}{
-		{"index", "/", 200, []string{"Your team’s analysis", "IDA login accounts"}},
-		{"stylesheet", "/styles.css", 200, []string{"--acid", ".account-row"}},
-		{"script", "/app.js", 200, []string{"loadResults", "/api/v1/accounts"}},
+		{"index", "/", 200, []string{"Lux administration", "Projects / IDBs", "Functions and metadata"}},
+		{"stylesheet", "/styles.css", 200, []string{".topbar", ".version"}},
+		{"script", "/app.js", 200, []string{"loadCollection", "/api/v1/projects", "/api/v1/metadata"}},
 		{"health", "/healthz", 200, []string{`"status":"ok"`, `"functions":1`}},
 		{"metrics", "/metrics", 200, []string{"lux_connections_total"}},
 		{"config", "/api/v1/config", 200, []string{`"server_name":"route-test"`, `"tls":true`, `"account_management":false`, `"history_limit":12`}},
@@ -49,6 +60,14 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 		{"files empty", "/api/v1/files?q=absent", 200, []string{`"items":[]`}},
 		{"file functions", "/api/v1/files/" + md5 + "/functions", 200, []string{"known_function"}},
 		{"file invalid", "/api/v1/files/nope/functions", 400, []string{"exactly 32"}},
+		{"projects", "/api/v1/projects?q=sample", 200, []string{`"idb_path":"sample.i64"`, `"versions":1`}},
+		{"projects empty", "/api/v1/projects?q=absent", 200, []string{`"items":[]`}},
+		{"project", "/api/v1/projects/" + strconv.FormatInt(projectID, 10), 200, []string{"sample.i64", `"function_versions"`}},
+		{"project invalid", "/api/v1/projects/nope", 400, []string{"positive integer"}},
+		{"project missing", "/api/v1/projects/999999", 404, []string{"project not found"}},
+		{"metadata", "/api/v1/metadata/" + strconv.FormatInt(versionID, 10), 200, []string{"known_function", `"project_id"`}},
+		{"metadata invalid", "/api/v1/metadata/0", 400, []string{"positive integer"}},
+		{"metadata missing", "/api/v1/metadata/999999", 404, []string{"metadata version not found"}},
 		{"legacy file", "/api/files/" + md5, 200, []string{`"len":64`, `"name":"known_function"`}},
 		{"legacy file invalid", "/api/files/nope", 400, []string{"exactly 32"}},
 		{"legacy function", "/api/funcs/" + hash, 200, []string{`"name":"known_function"`, `"Function"`, `"in_files"`}},
@@ -77,6 +96,102 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 				t.Error("security middleware header missing")
 			}
 		})
+	}
+}
+
+func TestProjectAndMetadataManagementAPI(t *testing.T) {
+	db, hash, _ := populatedWebStore(t)
+	projects, err := db.ListProjects(context.Background(), "", 10, 0)
+	if err != nil || len(projects) != 1 {
+		t.Fatalf("projects: %#v, %v", projects, err)
+	}
+	projectID := projects[0].ID
+	versions, err := db.Function(context.Background(), hash)
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("versions: %#v, %v", versions, err)
+	}
+	versionID := versions[0].ID
+	server := newWebTestServer(t, config.Config{AdminToken: "secret", AllowDeletes: true}, db)
+	defer server.Close()
+
+	projectPath := "/api/v1/projects/" + strconv.FormatInt(projectID, 10)
+	versionPath := "/api/v1/metadata/" + strconv.FormatInt(versionID, 10)
+	tests := []struct {
+		name, method, path, body, token string
+		status                          int
+	}{
+		{"project update unauthorized", http.MethodPatch, projectPath, `{"idb_path":"x.i64"}`, "", http.StatusUnauthorized},
+		{"project update empty", http.MethodPatch, projectPath, `{}`, "secret", http.StatusBadRequest},
+		{"project update malformed", http.MethodPatch, projectPath, `{`, "secret", http.StatusBadRequest},
+		{"project update missing", http.MethodPatch, "/api/v1/projects/999999", `{"idb_path":"x.i64"}`, "secret", http.StatusNotFound},
+		{"metadata update unauthorized", http.MethodPatch, versionPath, `{"name":"x"}`, "", http.StatusUnauthorized},
+		{"metadata update empty", http.MethodPatch, versionPath, `{}`, "secret", http.StatusBadRequest},
+		{"metadata update invalid hex", http.MethodPatch, versionPath, `{"metadata":"xyz"}`, "secret", http.StatusBadRequest},
+		{"metadata update missing", http.MethodPatch, "/api/v1/metadata/999999", `{"name":"x"}`, "secret", http.StatusNotFound},
+		{"delete project unauthorized", http.MethodDelete, projectPath, "", "", http.StatusUnauthorized},
+		{"delete metadata unauthorized", http.MethodDelete, versionPath, "", "", http.StatusUnauthorized},
+		{"delete metadata bad id", http.MethodDelete, "/api/v1/metadata/nope", "", "secret", http.StatusBadRequest},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := accountRequest(t, server, test.method, test.path, test.body, test.token)
+			defer response.Body.Close()
+			if response.StatusCode != test.status {
+				body, _ := io.ReadAll(response.Body)
+				t.Fatalf("status %d, want %d: %s", response.StatusCode, test.status, body)
+			}
+		})
+	}
+
+	response := accountRequest(t, server, http.MethodPatch, projectPath,
+		`{"file_path":"/new/sample.exe","idb_path":"/new/sample.i64"}`, "secret")
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"/new/sample.i64"`) {
+		t.Fatalf("project update status %d: %s", response.StatusCode, body)
+	}
+	response = accountRequest(t, server, http.MethodPatch, versionPath,
+		`{"name":"managed_name","length":77,"metadata":"00010203"}`, "secret")
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"name":"managed_name"`) ||
+		!strings.Contains(string(body), `"metadata":"00010203"`) {
+		t.Fatalf("metadata update status %d: %s", response.StatusCode, body)
+	}
+
+	response = accountRequest(t, server, http.MethodDelete, versionPath, "", "secret")
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"deleted_versions":1`) {
+		t.Fatalf("metadata delete status %d: %s", response.StatusCode, body)
+	}
+	response = accountRequest(t, server, http.MethodDelete, versionPath, "", "secret")
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing metadata delete status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = accountRequest(t, server, http.MethodDelete, projectPath, "", "secret")
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("orphaned project should be gone, status %d", response.StatusCode)
+	}
+	response.Body.Close()
+}
+
+func TestProjectAndMetadataDeletesDisabled(t *testing.T) {
+	db, hash, _ := populatedWebStore(t)
+	projects, _ := db.ListProjects(context.Background(), "", 10, 0)
+	versions, _ := db.Function(context.Background(), hash)
+	server := newWebTestServer(t, config.Config{AllowDeletes: false}, db)
+	defer server.Close()
+	for _, path := range []string{
+		"/api/v1/projects/" + strconv.FormatInt(projects[0].ID, 10),
+		"/api/v1/metadata/" + strconv.FormatInt(versions[0].ID, 10),
+	} {
+		response := accountRequest(t, server, http.MethodDelete, path, "", "")
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s: status %d", path, response.StatusCode)
+		}
+		response.Body.Close()
 	}
 }
 
@@ -277,7 +392,11 @@ func TestManagementDeleteAuthorizationAndOutcomes(t *testing.T) {
 
 func TestManagementDatabaseFailures(t *testing.T) {
 	db, hash, md5 := populatedWebStore(t)
-	server := newWebTestServer(t, config.Config{}, db)
+	projects, _ := db.ListProjects(context.Background(), "", 10, 0)
+	versions, _ := db.Function(context.Background(), hash)
+	projectID := strconv.FormatInt(projects[0].ID, 10)
+	versionID := strconv.FormatInt(versions[0].ID, 10)
+	server := newWebTestServer(t, config.Config{AllowDeletes: true}, db)
 	defer server.Close()
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -292,6 +411,9 @@ func TestManagementDatabaseFailures(t *testing.T) {
 		{"/api/v1/functions/" + hash, http.StatusInternalServerError},
 		{"/api/v1/files", http.StatusInternalServerError},
 		{"/api/v1/files/" + md5 + "/functions", http.StatusInternalServerError},
+		{"/api/v1/projects", http.StatusInternalServerError},
+		{"/api/v1/projects/" + projectID, http.StatusInternalServerError},
+		{"/api/v1/metadata/" + versionID, http.StatusInternalServerError},
 		{"/api/files/" + md5, http.StatusInternalServerError},
 		{"/api/funcs/" + hash, http.StatusInternalServerError},
 	}
@@ -304,6 +426,20 @@ func TestManagementDatabaseFailures(t *testing.T) {
 		if response.StatusCode != test.status {
 			t.Errorf("%s: status %d, want %d", test.path, response.StatusCode, test.status)
 		}
+	}
+	for _, test := range []struct {
+		method, path, body string
+	}{
+		{http.MethodPatch, "/api/v1/projects/" + projectID, `{"idb_path":"x"}`},
+		{http.MethodDelete, "/api/v1/projects/" + projectID, ""},
+		{http.MethodPatch, "/api/v1/metadata/" + versionID, `{"name":"x"}`},
+		{http.MethodDelete, "/api/v1/metadata/" + versionID, ""},
+	} {
+		response := accountRequest(t, server, test.method, test.path, test.body, "")
+		if response.StatusCode != http.StatusInternalServerError {
+			t.Errorf("%s %s: status %d", test.method, test.path, response.StatusCode)
+		}
+		response.Body.Close()
 	}
 }
 

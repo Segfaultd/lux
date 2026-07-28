@@ -36,7 +36,7 @@ func TestManagementUIAndAPI(t *testing.T) {
 	}
 	body, _ := io.ReadAll(response.Body)
 	response.Body.Close()
-	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "Your team’s analysis") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "Lux administration") {
 		t.Fatalf("management UI: status=%d body=%q", response.StatusCode, body)
 	}
 	if response.Header.Get("Content-Security-Policy") == "" {

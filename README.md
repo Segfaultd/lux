@@ -11,7 +11,7 @@ Lux was independently implemented from the protocol behavior in the sibling `lum
 - Lumen-compatible best-metadata scoring and selection
 - PostgreSQL persistence with connection pooling, foreign keys, and automatic schema creation
 - Optional TLS with a PEM certificate and key
-- Embedded management dashboard with function/file search, metadata histories, decoded comments, and protected deletion
+- Embedded administration console for accounts, IDB projects, files, functions, raw metadata versions, decoded comments, and protected mutations
 - JSON management API, Lumen-compatible read-only HTTP routes, health check, and Prometheus metrics
 - One static, CGO-free binary and a small scratch-based container image
 
@@ -65,7 +65,7 @@ Every option has a command-line flag and an environment variable:
 | `-server-name` | `LUX_SERVER_NAME` | `lux` | Name shown to clients |
 | `-username` | `LUX_USERNAME` | `guest` | Initial IDA account, only used when the account table is empty |
 | `-password` | `LUX_PASSWORD` | empty | Initial password; empty accepts any password until rotated |
-| `-admin-token` | `LUX_ADMIN_TOKEN` | empty | Bearer token for web deletion |
+| `-admin-token` | `LUX_ADMIN_TOKEN` | empty | Bearer token for management changes |
 | `-allow-deletes` | `LUX_ALLOW_DELETES` | `false` | Enable RPC and web deletion |
 | `-history-limit` | `LUX_HISTORY_LIMIT` | `50` | Histories per hash; 0 disables |
 | `-tls-cert` | `LUX_TLS_CERT` | empty | PEM server certificate |
@@ -77,7 +77,7 @@ Set `LUX_LOG_LEVEL=debug` for protocol and request diagnostics.
 
 Lumina usernames and bcrypt password hashes are stored in PostgreSQL. On the first startup, Lux creates the initial account from `LUX_USERNAME` and `LUX_PASSWORD`; later environment changes do not overwrite database-managed credentials.
 
-Open **Manage access** in the management console to add accounts, rotate passwords, enable or disable access, and remove accounts without restarting Lux. The management token is required. Lux prevents disabling or deleting the final enabled account, and historical metadata remains attached to its original username even if that account is later removed. Changes affect new IDA connections; already-connected clients remain active until disconnect.
+Open **Authentication** in the management console to add accounts, rotate passwords, enable or disable access, and remove accounts without restarting Lux. The management token is required. Lux prevents disabling or deleting the final enabled account, and historical metadata remains attached to its original username even if that account is later removed. Changes affect new IDA connections; already-connected clients remain active until disconnect.
 
 ### TLS and IDA certificate pinning
 
@@ -103,12 +103,19 @@ IDA pins the Lumina server certificate. Copy the public certificate to `hexrays.
 | `DELETE` | `/api/v1/functions/{hash}` | Delete all versions |
 | `GET` | `/api/v1/files?q=` | Search source files |
 | `GET` | `/api/v1/files/{md5}/functions` | List a file's functions |
+| `GET` | `/api/v1/projects?q=` | Search contributed IDB projects |
+| `GET` | `/api/v1/projects/{id}` | Inspect a project and its function versions |
+| `PATCH` | `/api/v1/projects/{id}` | Change a project's file or IDB path |
+| `DELETE` | `/api/v1/projects/{id}` | Delete a project and its contributed versions |
+| `GET` | `/api/v1/metadata/{id}` | Inspect one function metadata version |
+| `PATCH` | `/api/v1/metadata/{id}` | Change a version's name, length, or metadata bytes |
+| `DELETE` | `/api/v1/metadata/{id}` | Delete one metadata version |
 | `GET`, `POST` | `/api/v1/accounts` | List or create IDA login accounts |
 | `PUT` | `/api/v1/accounts/{username}/password` | Rotate an account password |
 | `PATCH` | `/api/v1/accounts/{username}` | Enable or disable an account |
 | `DELETE` | `/api/v1/accounts/{username}` | Remove an account |
 
-Deletion must be enabled with `LUX_ALLOW_DELETES=true`. Account management always requires a configured admin token. Send `Authorization: Bearer <token>`; the browser console keeps it only in session storage.
+Deletion must be enabled with `LUX_ALLOW_DELETES=true`. Account management always requires a configured admin token, and all other mutations require it when configured. Send `Authorization: Bearer <token>`; the browser console keeps it only in session storage.
 
 Compatibility aliases are available at `GET /api/files/{md5}` and `GET /api/funcs/{hash}`.
 
