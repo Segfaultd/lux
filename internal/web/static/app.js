@@ -7,6 +7,7 @@ const state = {
     functions: { page: 0, query: "", more: false },
     files: { page: 0, query: "", more: false },
   },
+  history: { view: "history", page: 0, more: false },
   limit: 50,
 };
 const $ = (id) => document.getElementById(id);
@@ -85,6 +86,8 @@ function renderStats(stats) {
     ["Contributors", stats.users],
     ["IDA accounts", stats.accounts],
     ["Projects / IDBs", stats.databases],
+    ["Pushes", stats.pushes],
+    ["History records", stats.history_records],
   ];
   $("stats").innerHTML = values.map(([label, value]) =>
     `<div><strong>${number.format(value)}</strong><span>${esc(label)}</span></div>`).join("");
@@ -247,6 +250,159 @@ async function openProject(id) {
   } catch (error) { target.innerHTML = `<p>${esc(error.message)}</p>`; handleError(error); }
 }
 
+function historyParams() {
+  const form = new FormData($("history-filter"));
+  const params = new URLSearchParams({
+    limit: state.limit,
+    offset: state.history.page * state.limit,
+  });
+  for (const name of ["q", "username", "project_id"]) {
+    const value = String(form.get(name) || "").trim();
+    if (value) params.set(name, value);
+  }
+  if (state.history.view === "history") {
+    for (const name of ["hash", "push_id"]) {
+      const value = String(form.get(name) || "").trim();
+      if (value) params.set(name, value);
+    }
+  }
+  for (const name of ["from", "to"]) {
+    const value = String(form.get(name) || "").trim();
+    if (value) params.set(name, new Date(value).toISOString());
+  }
+  return params;
+}
+
+async function loadHistory() {
+  const body = $("history-table");
+  body.innerHTML = emptyRow("Loading…");
+  try {
+    const data = await api(`/api/v1/${state.history.view}?${historyParams()}`);
+    state.history.more = data.items.length === state.limit;
+    renderHistory(data.items);
+    const pager = $("history-pager");
+    pager.querySelector('[data-dir="-1"]').disabled = state.history.page === 0;
+    pager.querySelector('[data-dir="1"]').disabled = !state.history.more;
+    pager.querySelector("span").textContent = `Page ${state.history.page + 1}`;
+  } catch (error) {
+    body.innerHTML = emptyRow(error.message);
+    handleError(error);
+  }
+}
+
+function renderHistory(items) {
+  if (state.history.view === "pushes") {
+    $("history-head").innerHTML = "<tr><th>ID</th><th>Time</th><th>User / host</th><th>IDB</th><th>Submitted</th><th>Changed</th><th>Source</th></tr>";
+    $("history-table").innerHTML = items.length ? items.map((push) => `
+      <tr class="clickable" data-push-id="${push.id}">
+        <td>${push.id}</td><td>${esc(date(push.pushed_at))}</td>
+        <td>${esc(push.username || "—")} / ${esc(push.hostname || "—")}</td>
+        <td>${esc(push.idb_path)}</td><td>${number.format(push.submitted_functions)}</td>
+        <td>${number.format(push.changed_functions)}</td><td>${esc(push.source)}</td>
+      </tr>`).join("") : emptyRow();
+    return;
+  }
+  $("history-head").innerHTML = "<tr><th>ID</th><th>Time</th><th>Operation</th><th>Name</th><th>Hash</th><th>User</th><th>Push</th><th>Score</th></tr>";
+  $("history-table").innerHTML = items.length ? items.map((change) => `
+    <tr class="clickable" data-history-id="${change.id}">
+      <td>${change.id}</td><td>${esc(date(change.changed_at))}</td><td>${esc(change.operation)}</td>
+      <td><strong>${esc(change.name)}</strong></td><td><code>${esc(change.hash)}</code></td>
+      <td>${esc(change.username || "—")}</td><td>${change.push_id}</td><td>${number.format(change.score)}</td>
+    </tr>`).join("") : emptyRow();
+}
+
+async function openHistory(id) {
+  const target = $("history-detail");
+  target.innerHTML = "<p>Loading…</p>";
+  try {
+    const diff = await api(`/api/v1/history/${id}`);
+    const change = diff.change;
+    target.innerHTML = `
+      <h2>Change ${change.id}</h2>
+      <dl>
+        <dt>Operation</dt><dd>${esc(change.operation)}</dd>
+        <dt>Function</dt><dd>${esc(change.name)} / <code>${esc(change.hash)}</code></dd>
+        <dt>Length / score</dt><dd>${number.format(change.length)} / ${number.format(change.score)}</dd>
+        <dt>Push / project</dt><dd>${change.push_id} / ${change.project_id}</dd>
+        <dt>Identity</dt><dd>${esc(change.username || "—")} @ ${esc(change.hostname || "—")}</dd>
+        <dt>IDB</dt><dd>${esc(change.idb_path)}</dd>
+        <dt>Changed</dt><dd>${esc(date(change.changed_at))}</dd>
+      </dl>
+      <div class="actions">
+        <button id="history-open-function">Open function</button>
+        <button id="history-restore">Restore this revision</button>
+        <button id="history-delete" class="danger" ${deleteAttrs()}>Delete revision</button>
+      </div>
+      <h3>Changes from previous revision</h3>
+      ${renderHistoryDiff(diff.fields)}
+      <details><summary>Raw metadata</summary><textarea readonly>${esc(change.metadata)}</textarea></details>`;
+    $("history-open-function").addEventListener("click", () => openFunction(change.hash));
+    $("history-restore").addEventListener("click", async () => {
+      if (!confirm(`Restore revision ${change.id} as the current metadata for ${change.hash}?`)) return;
+      try {
+        await api(`/api/v1/history/${change.id}/restore`, adminOptions("POST"));
+        notify(`Revision ${change.id} restored as a new history record.`);
+        await Promise.all([loadHistory(), refreshStats()]);
+        target.innerHTML = "<p>Revision restored. Select a record to inspect it.</p>";
+      } catch (error) { handleError(error); }
+    });
+    $("history-delete").addEventListener("click", async () => {
+      if (!confirm(`Delete revision ${change.id}? The current function will move to the newest remaining revision.`)) return;
+      try {
+        await api(`/api/v1/history/${change.id}`, adminOptions("DELETE"));
+        notify(`Revision ${change.id} deleted.`);
+        await Promise.all([loadHistory(), refreshStats(), loadCollection("functions")]);
+        target.innerHTML = "<p>Revision deleted.</p>";
+      } catch (error) { handleError(error); }
+    });
+  } catch (error) { target.innerHTML = `<p>${esc(error.message)}</p>`; handleError(error); }
+}
+
+function renderHistoryDiff(fields) {
+  if (!fields.length) return "<p>No field-level differences.</p>";
+  return `<div class="table-wrap"><table class="diff-table"><thead><tr><th>Field</th><th>Before</th><th>After</th></tr></thead>
+    <tbody>${fields.map((field) => `<tr><th>${esc(field.field)}</th>
+      <td>${renderDiffValue(field.before)}</td><td>${renderDiffValue(field.after)}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+function renderDiffValue(value) {
+  if (value === undefined || value === null) return "—";
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return `<pre>${esc(text)}</pre>`;
+}
+
+async function openPush(id) {
+  const target = $("history-detail");
+  target.innerHTML = "<p>Loading…</p>";
+  try {
+    const push = await api(`/api/v1/pushes/${id}`);
+    target.innerHTML = `
+      <h2>Push ${push.id}</h2>
+      <dl>
+        <dt>Time</dt><dd>${esc(date(push.pushed_at))}</dd>
+        <dt>Source</dt><dd>${esc(push.source)} / protocol ${push.protocol_version}</dd>
+        <dt>Identity</dt><dd>${esc(push.username || "—")} @ ${esc(push.hostname || "—")}</dd>
+        <dt>Project</dt><dd>${push.project_id} / ${esc(push.idb_path)}</dd>
+        <dt>Input</dt><dd>${esc(push.file_path)} / <code>${esc(push.file_md5)}</code></dd>
+        <dt>Functions</dt><dd>${number.format(push.submitted_functions)} submitted / ${number.format(push.changed_functions)} changed</dd>
+      </dl>
+      <div class="actions"><button id="push-delete" class="danger" ${deleteAttrs()}>Delete push and revisions</button></div>
+      <h3>Changes in this push</h3>
+      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Operation</th><th>Hash</th><th></th></tr></thead>
+      <tbody>${push.changes.length ? push.changes.map((change) => `<tr><td>${esc(change.name)}</td><td>${esc(change.operation)}</td>
+        <td><code>${esc(change.hash)}</code></td><td><button data-history-id="${change.id}">Diff</button></td></tr>`).join("") : emptyRow()}</tbody></table></div>`;
+    $("push-delete").addEventListener("click", async () => {
+      if (!confirm(`Delete push ${push.id} and its ${push.changes.length} revision(s)?`)) return;
+      try {
+        await api(`/api/v1/pushes/${push.id}`, adminOptions("DELETE"));
+        notify(`Push ${push.id} deleted.`);
+        await Promise.all([loadHistory(), refreshStats(), loadCollection("functions"), loadCollection("projects")]);
+        target.innerHTML = "<p>Push deleted.</p>";
+      } catch (error) { handleError(error); }
+    });
+  } catch (error) { target.innerHTML = `<p>${esc(error.message)}</p>`; handleError(error); }
+}
+
 async function openFunction(hash) {
   showSection("functions");
   const target = $("function-detail");
@@ -338,6 +494,7 @@ function showSection(name) {
   document.querySelectorAll(".page").forEach((section) => section.classList.toggle("active", section.id === `section-${name}`));
   document.querySelectorAll("nav [data-section]").forEach((button) => button.classList.toggle("active", button.dataset.section === name));
   if (name === "accounts") loadAccounts();
+  if (name === "history") loadHistory();
   if (state.pages[name]) loadCollection(name);
 }
 
@@ -348,6 +505,10 @@ document.addEventListener("click", (event) => {
   if (reload) reload.dataset.reload === "accounts" ? loadAccounts() : loadCollection(reload.dataset.reload);
   const project = event.target.closest("[data-project-id]");
   if (project) openProject(project.dataset.projectId);
+  const history = event.target.closest("[data-history-id]");
+  if (history) openHistory(history.dataset.historyId);
+  const push = event.target.closest("[data-push-id]");
+  if (push) openPush(push.dataset.pushId);
   const fn = event.target.closest("[data-function-hash]");
   if (fn) openFunction(fn.dataset.functionHash);
   const file = event.target.closest("[data-file-md5]");
@@ -358,6 +519,32 @@ document.addEventListener("click", (event) => {
   if (account) accountAction(account);
   const deleteButton = event.target.closest("[data-delete-version]");
   if (deleteButton) deleteVersion(deleteButton);
+});
+
+document.querySelectorAll("[data-history-view]").forEach((button) => button.addEventListener("click", () => {
+  state.history.view = button.dataset.historyView;
+  state.history.page = 0;
+  document.querySelectorAll("[data-history-view]").forEach((item) =>
+    item.classList.toggle("active", item === button));
+  $("history-detail").innerHTML = "<p>Select a change or push.</p>";
+  loadHistory();
+}));
+$("history-filter").addEventListener("submit", (event) => {
+  event.preventDefault();
+  state.history.page = 0;
+  loadHistory();
+});
+$("history-filter").addEventListener("reset", () => {
+  setTimeout(() => {
+    state.history.page = 0;
+    loadHistory();
+  }, 0);
+});
+$("history-pager").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-dir]");
+  if (!button) return;
+  state.history.page = Math.max(0, state.history.page + Number(button.dataset.dir));
+  loadHistory();
 });
 
 document.addEventListener("submit", (event) => {

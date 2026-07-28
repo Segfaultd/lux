@@ -24,6 +24,7 @@
       <button class="active" data-section="overview">Overview</button>
       <button data-section="accounts">Authentication</button>
       <button data-section="projects">Projects / IDBs</button>
+      <button data-section="history">Push history</button>
       <button data-section="functions">Functions</button>
       <button data-section="files">Files</button>
       <button data-section="server">Server</button>
@@ -72,6 +73,35 @@
             <div class="pager" data-pager="projects"><button data-dir="-1">Previous</button><span>Page 1</span><button data-dir="1">Next</button></div>
           </div>
           <aside id="project-detail" class="detail"><p>Select a project.</p></aside>
+        </div>
+      </section>
+
+      <section id="section-history" class="page">
+        <h1>Push and metadata history</h1>
+        <p>Audit every native push and metadata revision. Restore or remove revisions while keeping the current Lumina selection consistent.</p>
+        <form id="history-filter" class="history-filter">
+          <label>Search<input name="q" placeholder="Name, path, hash, user"></label>
+          <label>Username<input name="username"></label>
+          <label>Function hash<input name="hash" maxlength="32"></label>
+          <label>Project ID<input name="project_id" type="number" min="1"></label>
+          <label>Push ID<input name="push_id" type="number" min="1"></label>
+          <label>From<input name="from" type="datetime-local"></label>
+          <label>To<input name="to" type="datetime-local"></label>
+          <div class="actions"><button type="submit">Apply filters</button><button type="reset">Clear</button></div>
+        </form>
+        <div class="history-tabs">
+          <button class="active" data-history-view="history">Changes</button>
+          <button data-history-view="pushes">Pushes</button>
+        </div>
+        <div class="split">
+          <div>
+            <div class="table-wrap"><table>
+              <thead id="history-head"></thead>
+              <tbody id="history-table"></tbody>
+            </table></div>
+            <div class="pager" id="history-pager"><button data-dir="-1">Previous</button><span>Page 1</span><button data-dir="1">Next</button></div>
+          </div>
+          <aside id="history-detail" class="detail"><p>Select a change or push.</p></aside>
         </div>
       </section>
 
