@@ -335,6 +335,8 @@ async function openHistory(id) {
       </div>
       <h3>Changes from previous revision</h3>
       ${renderHistoryDiff(diff.fields)}
+      <h3>Structured metadata</h3>
+      ${renderMetadataDocument(diff.metadata_document, false)}
       <details><summary>Raw metadata</summary><textarea readonly>${esc(change.metadata)}</textarea></details>`;
     $("history-open-function").addEventListener("click", () => openFunction(change.hash));
     $("history-restore").addEventListener("click", async () => {
@@ -429,11 +431,14 @@ async function openFunction(hash) {
 
 function renderVersion(version) {
   const comments = (version.comments || []).filter((comment) => comment.type !== "parse-error");
-  return `<form class="version" data-version-id="${version.id}" data-version-hash="${esc(version.hash)}">
+  return `<article class="version" data-version-id="${version.id}" data-version-hash="${esc(version.hash)}">
     <div class="version-heading"><strong>Version ${version.id}</strong><span>score ${version.score} · project ${version.project_id}</span></div>
-    <label>Name<input name="name" value="${esc(version.name)}"></label>
-    <label>Length<input name="length" type="number" min="0" max="4294967295" value="${version.length}"></label>
-    <label>Raw metadata (hex)<textarea name="metadata" spellcheck="false">${esc(version.metadata)}</textarea></label>
+    <form class="version-edit">
+      <label>Name<input name="name" value="${esc(version.name)}"></label>
+      <label>Length<input name="length" type="number" min="0" max="4294967295" value="${version.length}"></label>
+      <label>Raw metadata (hex)<textarea name="metadata" spellcheck="false">${esc(version.metadata)}</textarea></label>
+      <div class="actions"><button type="submit">Save raw version</button></div>
+    </form>
     <dl>
       <dt>Source</dt><dd>${esc(version.file_path)} / <code>${esc(version.file_md5)}</code></dd>
       <dt>IDB</dt><dd>${esc(version.idb_path)}</dd>
@@ -441,30 +446,35 @@ function renderVersion(version) {
       <dt>Updated</dt><dd>${esc(date(version.updated_at))}</dd>
       <dt>Decoded comments</dt><dd>${comments.length ? comments.map((comment) => esc(comment.text)).join("<br>") : "None"}</dd>
     </dl>
-    <div class="actions"><button type="submit">Save version</button><button type="button" class="danger" data-delete-version="${version.id}" ${deleteAttrs()}>Delete version</button></div>
-  </form>`;
+    <div class="actions">
+      <button type="button" data-explore-version="${version.id}">Open metadata explorer</button>
+      <button type="button" class="danger" data-delete-version="${version.id}" ${deleteAttrs()}>Delete version</button>
+    </div>
+    <div class="metadata-explorer" id="metadata-explorer-${version.id}" hidden></div>
+  </article>`;
 }
 
 async function saveVersion(form) {
-  const id = form.dataset.versionId;
+  const version = form.closest("[data-version-id]");
+  const id = version.dataset.versionId;
   const data = new FormData(form);
   try {
     await api(`/api/v1/metadata/${id}`, adminOptions("PATCH", {
       name: data.get("name"), length: Number(data.get("length")), metadata: data.get("metadata").trim(),
     }));
     notify(`Metadata version ${id} saved.`);
-    await Promise.all([openFunction(form.dataset.versionHash), loadCollection("functions")]);
+    await Promise.all([openFunction(version.dataset.versionHash), loadCollection("functions")]);
   } catch (error) { handleError(error); }
 }
 
 async function deleteVersion(button) {
   const id = button.dataset.deleteVersion;
-  const form = button.closest("form");
+  const version = button.closest("[data-version-id]");
   if (!confirm(`Delete metadata version ${id}?`)) return;
   try {
     await api(`/api/v1/metadata/${id}`, adminOptions("DELETE"));
     notify(`Metadata version ${id} deleted.`);
-    await Promise.all([openFunction(form.dataset.versionHash), loadCollection("functions"), refreshStats()]);
+    await Promise.all([openFunction(version.dataset.versionHash), loadCollection("functions"), refreshStats()]);
   } catch (error) {
     if (error.status === 404) {
       $("function-detail").innerHTML = "<p>No versions remain.</p>";
@@ -472,6 +482,196 @@ async function deleteVersion(button) {
     }
     handleError(error);
   }
+}
+
+async function openMetadataExplorer(id) {
+  const target = $(`metadata-explorer-${id}`);
+  if (!target) return;
+  target.hidden = false;
+  target.innerHTML = "<p>Loading structured metadata…</p>";
+  try {
+    const data = await api(`/api/v1/metadata/${id}/structured`);
+    target.innerHTML = renderMetadataDocument(data.document, true, id, data.hash);
+  } catch (error) {
+    target.innerHTML = `<p>${esc(error.message)}</p>`;
+    handleError(error);
+  }
+}
+
+function renderMetadataDocument(document, editable, versionId = "", hash = "") {
+  if (!document) return "<p>No structured metadata document.</p>";
+  const summary = document.summary || {};
+  const status = document.error ? `<p class="metadata-error">${esc(document.error)}</p>` : "";
+  const chunks = (document.chunks || []).map((chunk) =>
+    renderMetadataChunk(chunk, editable, versionId, hash)).join("");
+  const append = editable ? `
+    <form class="structured-append" data-version-id="${versionId}" data-version-hash="${esc(hash)}">
+      <h4>Append raw chunk</h4>
+      <div class="metadata-grid">
+        <label>Chunk code<input name="code" type="number" min="1" max="4294967295" required></label>
+        <label>Payload (hex)<textarea name="payload" spellcheck="false" placeholder="Leave empty for an empty payload"></textarea></label>
+      </div>
+      <button type="submit">Append chunk</button>
+    </form>` : "";
+  return `<div class="metadata-summary">
+      <span>${number.format(document.size || 0)} bytes</span>
+      <span>${number.format(summary.known_chunks || 0)} known</span>
+      <span>${number.format(summary.unknown_chunks || 0)} unknown</span>
+      <span>${number.format(summary.comments || 0)} comments</span>
+      <span>${number.format(summary.stack_points || 0)} stack points</span>
+      <span>${number.format(summary.decode_failures || 0)} decode errors</span>
+    </div>${status}${chunks || "<p>No metadata chunks.</p>"}${append}`;
+}
+
+function renderMetadataChunk(chunk, editable, versionId, hash) {
+  const badges = `${chunk.known ? "known" : "unknown"} · ${esc(chunk.format)} · ${number.format(chunk.size)} bytes`;
+  const decoded = chunkDecodedValue(chunk);
+  if (!editable) {
+    return `<section class="metadata-chunk">
+      <header><strong>${esc(chunk.key)}</strong><span>code ${chunk.code} · ${badges}</span></header>
+      ${chunk.error ? `<p class="metadata-error">${esc(chunk.error)}</p>` : ""}
+      <pre>${esc(JSON.stringify(decoded, null, 2))}</pre>
+      <details><summary>Raw payload</summary><textarea readonly>${esc(chunk.payload)}</textarea></details>
+    </section>`;
+  }
+  const kind = chunkEditorKind(chunk);
+  return `<form class="metadata-chunk structured-chunk" data-version-id="${versionId}"
+      data-version-hash="${esc(hash)}" data-chunk-index="${chunk.index}" data-chunk-code="${chunk.code}" data-chunk-kind="${kind}">
+    <header><strong>${esc(chunk.key)}</strong><span>code ${chunk.code} · ${badges}</span></header>
+    ${chunk.error ? `<p class="metadata-error">${esc(chunk.error)}</p>` : ""}
+    ${renderChunkEditor(chunk, kind)}
+    <div class="actions">
+      <button type="submit">Save chunk</button>
+      <button type="button" class="danger" data-remove-chunk="${chunk.index}">Remove chunk</button>
+    </div>
+  </form>`;
+}
+
+function chunkDecodedValue(chunk) {
+  if (chunk.type !== undefined) return chunk.type;
+  if (chunk.elapsed_seconds !== undefined) return { elapsed_seconds: chunk.elapsed_seconds };
+  if (chunk.text !== undefined) return { text: chunk.text };
+  if (chunk.comments !== undefined) return chunk.comments;
+  if (chunk.stack_points !== undefined) return chunk.stack_points;
+  return { payload: chunk.payload };
+}
+
+function chunkEditorKind(chunk) {
+  if (chunk.code === 1) return "type";
+  if (chunk.code === 2) return "elapsed";
+  if (chunk.code === 3 || chunk.code === 4) return "text";
+  if (chunk.code >= 5 && chunk.code <= 7) return "comments";
+  if (chunk.code === 8) return "stack";
+  return "raw";
+}
+
+function renderChunkEditor(chunk, kind) {
+  if (kind === "type" && chunk.type) {
+    return `<div class="metadata-grid">
+      <label>Source<input name="source" type="number" min="0" max="255" value="${chunk.type.source}"></label>
+      <label>Serialized type (hex)<textarea name="type" spellcheck="false">${esc(chunk.type.type)}</textarea></label>
+      <label>Serialized fields (hex)<textarea name="fields" spellcheck="false">${esc(chunk.type.fields || "")}</textarea></label>
+    </div>`;
+  }
+  if (kind === "elapsed" && chunk.elapsed_seconds !== undefined) {
+    return `<label>Elapsed seconds<input name="elapsed_seconds" type="number" value="${chunk.elapsed_seconds}"></label>`;
+  }
+  if (kind === "text" && chunk.text !== undefined) {
+    return `<label>Comment<textarea name="text">${esc(chunk.text)}</textarea></label>`;
+  }
+  if (kind === "comments" && !chunk.error) {
+    const extra = chunk.code === 7;
+    const rows = (chunk.comments || []).map((comment) => renderCommentRow(comment, extra)).join("");
+    return `<div class="metadata-rows">${rows}</div>
+      <button type="button" data-add-comment="${extra ? "extra" : "instruction"}">Add comment</button>`;
+  }
+  if (kind === "stack" && !chunk.error) {
+    const rows = (chunk.stack_points || []).map(renderStackPointRow).join("");
+    return `<div class="metadata-rows">${rows}</div><button type="button" data-add-stack-point>Add stack point</button>`;
+  }
+  return `<label>Raw payload (hex)<textarea name="payload" spellcheck="false">${esc(chunk.payload)}</textarea></label>`;
+}
+
+function renderCommentRow(comment = {}, extra = false) {
+  const type = comment.type || (extra ? "anterior" : "instruction");
+  return `<div class="metadata-row metadata-comment-row">
+    <label>Offset<input data-field="offset" type="number" min="0" max="4294967295" value="${comment.offset ?? 0}" required></label>
+    ${extra ? `<label>Kind<select data-field="type">
+      <option value="anterior" ${type === "anterior" ? "selected" : ""}>Anterior</option>
+      <option value="posterior" ${type === "posterior" ? "selected" : ""}>Posterior</option>
+    </select></label>` : ""}
+    <label>Text<textarea data-field="text">${esc(comment.text || "")}</textarea></label>
+    <button type="button" class="danger" data-remove-row>Remove</button>
+  </div>`;
+}
+
+function renderStackPointRow(point = {}) {
+  return `<div class="metadata-row metadata-stack-row">
+    <label>Offset<input data-field="offset" type="number" min="0" max="4294967295" value="${point.offset ?? 0}" required></label>
+    <label>Stack delta<input data-field="delta" type="number" value="${point.delta ?? 0}" required></label>
+    <button type="button" class="danger" data-remove-row>Remove</button>
+  </div>`;
+}
+
+async function saveStructuredChunk(form) {
+  const mutation = {
+    operation: "set",
+    index: Number(form.dataset.chunkIndex),
+  };
+  const kind = form.dataset.chunkKind;
+  if (kind === "type") {
+    mutation.type = {
+      source: Number(form.elements.source.value),
+      type: form.elements.type.value.trim(),
+      fields: form.elements.fields.value.trim(),
+    };
+  } else if (kind === "elapsed") {
+    mutation.elapsed_seconds = Number(form.elements.elapsed_seconds.value);
+  } else if (kind === "text") {
+    mutation.text = form.elements.text.value;
+  } else if (kind === "comments") {
+    mutation.comments = [...form.querySelectorAll(".metadata-comment-row")].map((row) => ({
+      offset: Number(row.querySelector('[data-field="offset"]').value),
+      type: row.querySelector('[data-field="type"]')?.value || "instruction",
+      text: row.querySelector('[data-field="text"]').value,
+    }));
+  } else if (kind === "stack") {
+    mutation.stack_points = [...form.querySelectorAll(".metadata-stack-row")].map((row) => ({
+      offset: Number(row.querySelector('[data-field="offset"]').value),
+      delta: Number(row.querySelector('[data-field="delta"]').value),
+    }));
+  } else {
+    mutation.payload = form.elements.payload.value.trim();
+  }
+  await mutateStructuredMetadata(form, mutation, `Chunk ${form.dataset.chunkIndex} saved.`);
+}
+
+async function mutateStructuredMetadata(element, mutation, message) {
+  const id = element.dataset.versionId;
+  const hash = element.dataset.versionHash;
+  try {
+    await api(`/api/v1/metadata/${id}/structured`, adminOptions("PATCH", { mutations: [mutation] }));
+    notify(message);
+    await openFunction(hash);
+    await openMetadataExplorer(id);
+    await loadCollection("functions");
+  } catch (error) { handleError(error); }
+}
+
+async function removeStructuredChunk(button) {
+  const form = button.closest(".structured-chunk");
+  if (!confirm(`Remove metadata chunk ${form.dataset.chunkIndex} (${form.dataset.chunkCode})?`)) return;
+  await mutateStructuredMetadata(form, {
+    operation: "remove", index: Number(form.dataset.chunkIndex),
+  }, `Chunk ${form.dataset.chunkIndex} removed.`);
+}
+
+async function appendStructuredChunk(form) {
+  await mutateStructuredMetadata(form, {
+    operation: "append",
+    code: Number(form.elements.code.value),
+    payload: form.elements.payload.value.trim(),
+  }, "Metadata chunk appended.");
 }
 
 async function openFile(md5) {
@@ -519,6 +719,21 @@ document.addEventListener("click", (event) => {
   if (account) accountAction(account);
   const deleteButton = event.target.closest("[data-delete-version]");
   if (deleteButton) deleteVersion(deleteButton);
+  const explorer = event.target.closest("[data-explore-version]");
+  if (explorer) openMetadataExplorer(explorer.dataset.exploreVersion);
+  const removeChunk = event.target.closest("[data-remove-chunk]");
+  if (removeChunk) removeStructuredChunk(removeChunk);
+  const removeRow = event.target.closest("[data-remove-row]");
+  if (removeRow) removeRow.closest(".metadata-row").remove();
+  const addComment = event.target.closest("[data-add-comment]");
+  if (addComment) {
+    addComment.previousElementSibling.insertAdjacentHTML(
+      "beforeend", renderCommentRow({}, addComment.dataset.addComment === "extra"));
+  }
+  const addStackPoint = event.target.closest("[data-add-stack-point]");
+  if (addStackPoint) {
+    addStackPoint.previousElementSibling.insertAdjacentHTML("beforeend", renderStackPointRow());
+  }
 });
 
 document.querySelectorAll("[data-history-view]").forEach((button) => button.addEventListener("click", () => {
@@ -558,10 +773,23 @@ document.addEventListener("submit", (event) => {
 });
 
 document.addEventListener("submit", (event) => {
-  const version = event.target.closest("[data-version-id]");
-  if (!version) return;
-  event.preventDefault();
-  saveVersion(version);
+  const structured = event.target.closest(".structured-chunk");
+  if (structured) {
+    event.preventDefault();
+    saveStructuredChunk(structured);
+    return;
+  }
+  const append = event.target.closest(".structured-append");
+  if (append) {
+    event.preventDefault();
+    appendStructuredChunk(append);
+    return;
+  }
+  const version = event.target.closest(".version-edit");
+  if (version) {
+    event.preventDefault();
+    saveVersion(version);
+  }
 });
 
 document.querySelectorAll("[data-pager]").forEach((pager) => pager.addEventListener("click", (event) => {

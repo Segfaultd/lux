@@ -54,8 +54,8 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 		bodyPieces []string
 	}{
 		{"index", "/", 200, []string{"Lux administration", "Projects / IDBs", "Push and metadata history", "Functions and metadata"}},
-		{"stylesheet", "/styles.css", 200, []string{".topbar", ".version", ".history-filter"}},
-		{"script", "/app.js", 200, []string{"loadCollection", "/api/v1/projects", "/api/v1/metadata", "/api/v1/history", "openPush"}},
+		{"stylesheet", "/styles.css", 200, []string{".topbar", ".version", ".history-filter", ".metadata-chunk", ".metadata-row"}},
+		{"script", "/app.js", 200, []string{"loadCollection", "/api/v1/projects", "/api/v1/metadata", "/api/v1/history", "openPush", "openMetadataExplorer", "saveStructuredChunk"}},
 		{"health", "/healthz", 200, []string{`"status":"ok"`, `"functions":1`}},
 		{"metrics", "/metrics", 200, []string{"lux_connections_total"}},
 		{"config", "/api/v1/config", 200, []string{`"server_name":"route-test"`, `"tls":true`, `"account_management":false`, `"history_limit":12`}},
