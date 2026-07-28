@@ -51,6 +51,9 @@ func run(parent context.Context, args []string) error {
 		return nil
 	}
 	if err := auth.New(db).Bootstrap(parent, cfg.Username, cfg.Password); err != nil {
+		if parent.Err() != nil {
+			return nil
+		}
 		return fmt.Errorf("bootstrap authentication account: %w", err)
 	}
 
