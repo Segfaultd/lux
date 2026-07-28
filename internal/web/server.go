@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/segfaultd/lux/internal/access"
 	authn "github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/metadata"
@@ -136,11 +137,16 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		Role     string `json:"role"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	account, err := s.auth.Create(r.Context(), request.Username, request.Password)
+	role := access.RoleContributor
+	if request.Role != "" {
+		role = access.Role(request.Role)
+	}
+	account, err := s.auth.CreateWithRole(r.Context(), request.Username, request.Password, role)
 	if err != nil {
 		s.writeAuthError(w, err)
 		return
@@ -171,16 +177,23 @@ func (s *Server) setAccountEnabled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Enabled *bool `json:"enabled"`
+		Enabled *bool   `json:"enabled"`
+		Role    *string `json:"role"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	if request.Enabled == nil {
-		writeError(w, http.StatusBadRequest, "enabled is required")
+	if (request.Enabled == nil) == (request.Role == nil) {
+		writeError(w, http.StatusBadRequest, "exactly one of enabled or role is required")
 		return
 	}
-	account, err := s.auth.SetEnabled(r.Context(), r.PathValue("username"), *request.Enabled)
+	var account store.AuthAccount
+	var err error
+	if request.Role != nil {
+		account, err = s.auth.SetRole(r.Context(), r.PathValue("username"), access.Role(*request.Role))
+	} else {
+		account, err = s.auth.SetEnabled(r.Context(), r.PathValue("username"), *request.Enabled)
+	}
 	if err != nil {
 		s.writeAuthError(w, err)
 		return
@@ -215,7 +228,8 @@ func (s *Server) requireAccountAdmin(w http.ResponseWriter, r *http.Request) boo
 
 func (s *Server) writeAuthError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, authn.ErrInvalidUsername), errors.Is(err, authn.ErrInvalidPassword):
+	case errors.Is(err, authn.ErrInvalidUsername), errors.Is(err, authn.ErrInvalidPassword),
+		errors.Is(err, access.ErrInvalidRole):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, store.ErrAuthAccountExists), errors.Is(err, store.ErrLastAuthAccount):
 		writeError(w, http.StatusConflict, err.Error())

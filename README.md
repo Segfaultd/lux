@@ -12,7 +12,7 @@ Lux was independently implemented from the protocol behavior in the sibling `lum
 - Immutable push and per-function revision history with native IDA history responses
 - PostgreSQL persistence with connection pooling, foreign keys, and automatic schema creation
 - Optional TLS with a PEM certificate and key
-- Embedded administration console for accounts, IDB projects, pushes, semantic revision diffs, files, functions, structured/raw metadata versions, restore, and protected deletion
+- Embedded administration console for role-based accounts, IDB projects, pushes, semantic revision diffs, files, functions, structured/raw metadata versions, restore, and protected deletion
 - JSON management API, Lumen-compatible read-only HTTP routes, health check, and Prometheus metrics
 - One static, CGO-free binary and a small scratch-based container image
 
@@ -76,9 +76,9 @@ Set `LUX_LOG_LEVEL=debug` for protocol and request diagnostics.
 
 ### IDA login accounts
 
-Lumina usernames and bcrypt password hashes are stored in PostgreSQL. On the first startup, Lux creates the initial account from `LUX_USERNAME` and `LUX_PASSWORD`; later environment changes do not overwrite database-managed credentials.
+Lumina usernames, roles, and bcrypt password hashes are stored in PostgreSQL. On the first startup, Lux creates an administrator from `LUX_USERNAME` and `LUX_PASSWORD`; later environment changes do not overwrite database-managed credentials. Accounts created later default to the contributor role.
 
-Open **Authentication** in the management console to add accounts, rotate passwords, enable or disable access, and remove accounts without restarting Lux. The management token is required. Lux prevents disabling or deleting the final enabled account, and historical metadata remains attached to its original username even if that account is later removed. Changes affect new IDA connections; already-connected clients remain active until disconnect.
+Open **Authentication** in the management console to add accounts, change roles, rotate passwords, enable or disable access, and remove accounts without restarting Lux. Readers can pull metadata and inspect history, contributors can additionally push metadata, and administrators can additionally delete native history when deletion is globally enabled. The management token is required. Lux prevents disabling or deleting the final enabled account, and historical metadata remains attached to its original username even if that account is later removed. Changes affect new IDA connections; already-connected clients retain their authenticated role until disconnect.
 
 ### TLS and IDA certificate pinning
 
@@ -122,7 +122,7 @@ IDA pins the Lumina server certificate. Copy the public certificate to `hexrays.
 | `PATCH` | `/api/v1/metadata/{id}/structured` | Set, remove, or append metadata chunks |
 | `GET`, `POST` | `/api/v1/accounts` | List or create IDA login accounts |
 | `PUT` | `/api/v1/accounts/{username}/password` | Rotate an account password |
-| `PATCH` | `/api/v1/accounts/{username}` | Enable or disable an account |
+| `PATCH` | `/api/v1/accounts/{username}` | Change an account role or enabled state |
 | `DELETE` | `/api/v1/accounts/{username}` | Remove an account |
 
 Deletion must be enabled with `LUX_ALLOW_DELETES=true`. Account management always requires a configured admin token, and all other mutations require it when configured. Send `Authorization: Bearer <token>`; the browser console keeps it only in session storage.

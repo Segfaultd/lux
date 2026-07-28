@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/segfaultd/lux/internal/access"
 	"github.com/segfaultd/lux/internal/store"
 	"github.com/segfaultd/lux/internal/testdb"
 )
@@ -29,7 +30,8 @@ func TestDynamicAccountLifecycleAndAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 	principal, err := service.Authenticate(ctx, " GUEST ", "any-password")
-	if err != nil || principal.Username != "guest" || principal.ID == 0 {
+	if err != nil || principal.Username != "guest" || principal.ID == 0 ||
+		principal.Role != access.RoleAdmin || !principal.Can(access.CapabilityManage) {
 		t.Fatalf("bootstrap authentication: %#v, %v", principal, err)
 	}
 
@@ -37,7 +39,7 @@ func TestDynamicAccountLifecycleAndAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !account.Enabled || !account.PasswordSet {
+	if !account.Enabled || !account.PasswordSet || account.Role != access.RoleContributor {
 		t.Fatalf("unexpected account: %#v", account)
 	}
 	if _, err := service.Create(ctx, "analyst", "another password"); !errors.Is(err, store.ErrAuthAccountExists) {
@@ -77,6 +79,15 @@ func TestDynamicAccountLifecycleAndAuthentication(t *testing.T) {
 	}
 	if _, err := service.SetEnabled(ctx, "Analyst", true); err != nil {
 		t.Fatal(err)
+	}
+	account, err = service.SetRole(ctx, "Analyst", access.RoleReader)
+	if err != nil || account.Role != access.RoleReader {
+		t.Fatalf("set role: %#v, %v", account, err)
+	}
+	principal, err = service.Authenticate(ctx, "Analyst", "rotated password")
+	if err != nil || principal.Role != access.RoleReader ||
+		principal.Can(access.CapabilityPush) || !principal.Can(access.CapabilityPull) {
+		t.Fatalf("reader principal: %#v, %v", principal, err)
 	}
 
 	accounts, err := service.List(ctx)
@@ -135,6 +146,18 @@ func TestAccountValidationAndDatabaseErrors(t *testing.T) {
 	}
 	if _, err := service.SetEnabled(ctx, "bad/name", true); !errors.Is(err, ErrInvalidUsername) {
 		t.Fatalf("invalid enable username returned %v", err)
+	}
+	if _, err := service.SetRole(ctx, "missing", access.RoleReader); !errors.Is(err, store.ErrAuthAccountNotFound) {
+		t.Fatalf("missing role update returned %v", err)
+	}
+	if _, err := service.SetRole(ctx, "valid", access.Role("owner")); !errors.Is(err, access.ErrInvalidRole) {
+		t.Fatalf("invalid role update returned %v", err)
+	}
+	if _, err := service.SetRole(ctx, "bad/name", access.RoleReader); !errors.Is(err, ErrInvalidUsername) {
+		t.Fatalf("invalid role username returned %v", err)
+	}
+	if _, err := service.CreateWithRole(ctx, "owner", "valid password", access.Role("owner")); !errors.Is(err, access.ErrInvalidRole) {
+		t.Fatalf("invalid create role returned %v", err)
 	}
 	if _, err := service.Delete(ctx, "missing"); !errors.Is(err, store.ErrAuthAccountNotFound) {
 		t.Fatalf("missing delete returned %v", err)

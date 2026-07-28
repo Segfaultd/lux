@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/segfaultd/lux/internal/access"
 	"github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
@@ -184,6 +185,84 @@ func TestDynamicDatabaseAuthentication(t *testing.T) {
 	assertFailure(t, readPacket(t, conn), 3, "authentication database")
 	conn.Close()
 	waitConnection(t, done)
+}
+
+func TestRoleCapabilitiesAreEnforced(t *testing.T) {
+	db, hash := populatedLuminaStore(t)
+	authService := auth.New(db)
+	if err := authService.Bootstrap(context.Background(), "admin", "admin password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authService.CreateWithRole(
+		context.Background(), "reader", "reader password", access.RoleReader,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authService.CreateWithRole(
+		context.Background(), "contributor", "contributor password", access.RoleContributor,
+	); err != nil {
+		t.Fatal(err)
+	}
+	server := testServerWithStore(t, config.Config{
+		ServerName: "unit", Username: "ignored", AllowDeletes: true, HistoryLimit: 10,
+		HelloWait: time.Second, CommandWait: time.Second, PullWait: time.Second,
+	}, db)
+
+	reader, readerDone := startDirectConnection(server)
+	sendHello(t, reader, 5, &protocol.Credentials{Username: "reader", Password: "reader password"})
+	if features := helloFeatures(t, readPacket(t, reader)); features&0x02 != 0 {
+		t.Fatalf("reader received delete feature %#x", features)
+	}
+	if err := protocol.WritePacket(reader, protocol.CodePullMetadata, pullRequest(hash)); err != nil {
+		t.Fatal(err)
+	}
+	if packet := readPacket(t, reader); packet.Code != protocol.CodePullMetadataResult {
+		t.Fatalf("reader pull response %#x", packet.Code)
+	}
+	if err := protocol.WritePacket(reader, protocol.CodePushMetadata, emptyPushRequest()); err != nil {
+		t.Fatal(err)
+	}
+	assertFailure(t, readPacket(t, reader), 2, "permission denied")
+	if err := protocol.WritePacket(reader, protocol.CodeGetFuncHistories, historyRequest(hash)); err != nil {
+		t.Fatal(err)
+	}
+	if packet := readPacket(t, reader); packet.Code != protocol.CodeGetFuncHistoriesResult {
+		t.Fatalf("reader history response %#x", packet.Code)
+	}
+	reader.Close()
+	waitConnection(t, readerDone)
+
+	contributor, contributorDone := startDirectConnection(server)
+	sendHello(t, contributor, 5, &protocol.Credentials{Username: "contributor", Password: "contributor password"})
+	if features := helloFeatures(t, readPacket(t, contributor)); features&0x02 != 0 {
+		t.Fatalf("contributor received delete feature %#x", features)
+	}
+	if err := protocol.WritePacket(contributor, protocol.CodePushMetadata, emptyPushRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if packet := readPacket(t, contributor); packet.Code != protocol.CodePushMetadataResult {
+		t.Fatalf("contributor push response %#x", packet.Code)
+	}
+	if err := protocol.WritePacket(contributor, protocol.CodeDeleteHistory, deleteRequest(hash)); err != nil {
+		t.Fatal(err)
+	}
+	assertFailure(t, readPacket(t, contributor), 2, "permission denied")
+	contributor.Close()
+	waitConnection(t, contributorDone)
+
+	admin, adminDone := startDirectConnection(server)
+	sendHello(t, admin, 5, &protocol.Credentials{Username: "admin", Password: "admin password"})
+	if features := helloFeatures(t, readPacket(t, admin)); features&0x02 == 0 {
+		t.Fatalf("admin did not receive delete feature %#x", features)
+	}
+	if err := protocol.WritePacket(admin, protocol.CodeDeleteHistory, deleteRequest(hash)); err != nil {
+		t.Fatal(err)
+	}
+	if packet := readPacket(t, admin); packet.Code != protocol.CodeDeleteHistoryResult {
+		t.Fatalf("admin delete response %#x", packet.Code)
+	}
+	admin.Close()
+	waitConnection(t, adminDone)
 }
 
 func TestMalformedAndUnsupportedCommands(t *testing.T) {
@@ -585,6 +664,52 @@ func deleteRequest(hash []byte) []byte {
 	e.DD(0)
 	e.DQ(0)
 	return append([]byte(nil), e.Payload()...)
+}
+
+func pullRequest(hash []byte) []byte {
+	var e protocol.Encoder
+	e.DD(0)
+	e.U32s(nil)
+	e.DD(1)
+	e.DD(0)
+	e.Bytes(hash)
+	return append([]byte(nil), e.Payload()...)
+}
+
+func emptyPushRequest() []byte {
+	var e protocol.Encoder
+	e.DD(0)
+	e.CString("roles.i64")
+	e.CString("roles.bin")
+	e.Fixed(make([]byte, 16))
+	e.CString("role-host")
+	e.DD(0)
+	e.DD(0)
+	return append([]byte(nil), e.Payload()...)
+}
+
+func helloFeatures(t *testing.T, packet protocol.Packet) uint32 {
+	t.Helper()
+	if packet.Code != protocol.CodeHelloResult {
+		t.Fatalf("hello response code %#x", packet.Code)
+	}
+	d := protocol.NewDecoder(packet.Payload)
+	for range 4 {
+		if _, err := d.CString(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.DD(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.DQ(); err != nil {
+		t.Fatal(err)
+	}
+	features, err := d.DD()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return features
 }
 
 func populatedLuminaStore(t *testing.T) (*store.Store, []byte) {

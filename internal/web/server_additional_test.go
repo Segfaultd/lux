@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/segfaultd/lux/internal/access"
 	"github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
@@ -387,11 +388,13 @@ func TestAccountManagementAPI(t *testing.T) {
 	response = accountRequest(t, server, http.MethodGet, "/api/v1/accounts", "", "secret")
 	body, _ := io.ReadAll(response.Body)
 	response.Body.Close()
-	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"username":"guest"`) {
+	if response.StatusCode != http.StatusOK ||
+		!strings.Contains(string(body), `"username":"guest"`) ||
+		!strings.Contains(string(body), `"role":"admin"`) {
 		t.Fatalf("account list status %d: %s", response.StatusCode, body)
 	}
 
-	response = accountRequest(t, server, http.MethodPost, "/api/v1/accounts", `{"username":"Analyst","password":"correct horse"}`, "secret")
+	response = accountRequest(t, server, http.MethodPost, "/api/v1/accounts", `{"username":"Analyst","password":"correct horse","role":"reader"}`, "secret")
 	if response.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(response.Body)
 		t.Fatalf("create account status %d: %s", response.StatusCode, body)
@@ -399,6 +402,10 @@ func TestAccountManagementAPI(t *testing.T) {
 	response.Body.Close()
 	if _, err := authService.Authenticate(context.Background(), "analyst", "correct horse"); err != nil {
 		t.Fatalf("new account did not authenticate: %v", err)
+	}
+	record, err := db.AuthAccountByUsername(context.Background(), "analyst")
+	if err != nil || record.Role != access.RoleReader {
+		t.Fatalf("new account role %#v: %v", record, err)
 	}
 
 	for _, test := range []struct {
@@ -410,11 +417,15 @@ func TestAccountManagementAPI(t *testing.T) {
 	}{
 		{"duplicate", http.MethodPost, "/api/v1/accounts", `{"username":"analyst","password":"another pass"}`, http.StatusConflict},
 		{"short password", http.MethodPost, "/api/v1/accounts", `{"username":"short","password":"bad"}`, http.StatusBadRequest},
+		{"invalid create role", http.MethodPost, "/api/v1/accounts", `{"username":"owner","password":"valid password","role":"owner"}`, http.StatusBadRequest},
 		{"malformed JSON", http.MethodPost, "/api/v1/accounts", `{`, http.StatusBadRequest},
 		{"unknown JSON field", http.MethodPost, "/api/v1/accounts", `{"username":"x","password":"valid pass","extra":true}`, http.StatusBadRequest},
 		{"multiple JSON values", http.MethodPost, "/api/v1/accounts", `{"username":"x","password":"valid pass"} {}`, http.StatusBadRequest},
 		{"missing enabled", http.MethodPatch, "/api/v1/accounts/Analyst", `{}`, http.StatusBadRequest},
 		{"missing account enable", http.MethodPatch, "/api/v1/accounts/missing", `{"enabled":true}`, http.StatusNotFound},
+		{"both role and enabled", http.MethodPatch, "/api/v1/accounts/Analyst", `{"enabled":true,"role":"admin"}`, http.StatusBadRequest},
+		{"invalid role", http.MethodPatch, "/api/v1/accounts/Analyst", `{"role":"owner"}`, http.StatusBadRequest},
+		{"missing account role", http.MethodPatch, "/api/v1/accounts/missing", `{"role":"reader"}`, http.StatusNotFound},
 		{"malformed password JSON", http.MethodPut, "/api/v1/accounts/Analyst/password", `{`, http.StatusBadRequest},
 		{"missing account password", http.MethodPut, "/api/v1/accounts/missing/password", `{"password":"new password"}`, http.StatusNotFound},
 		{"missing account delete", http.MethodDelete, "/api/v1/accounts/missing", ``, http.StatusNotFound},
@@ -437,6 +448,11 @@ func TestAccountManagementAPI(t *testing.T) {
 	if _, err := authService.Authenticate(context.Background(), "Analyst", "rotated password"); err != nil {
 		t.Fatalf("rotated account did not authenticate: %v", err)
 	}
+	response = accountRequest(t, server, http.MethodPatch, "/api/v1/accounts/Analyst", `{"role":"contributor"}`, "secret")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("role update status %d", response.StatusCode)
+	}
+	response.Body.Close()
 	response = accountRequest(t, server, http.MethodPatch, "/api/v1/accounts/Analyst", `{"enabled":false}`, "secret")
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("disable account status %d", response.StatusCode)

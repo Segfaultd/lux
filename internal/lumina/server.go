@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/segfaultd/lux/internal/access"
 	"github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
@@ -125,7 +126,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		}
 	} else {
 		var features uint32
-		if s.cfg.AllowDeletes {
+		if s.cfg.AllowDeletes && principal.Can(access.CapabilityDeleteHistory) {
 			features |= 0x02
 		}
 		if err := protocol.WritePacket(conn, protocol.CodeHelloResult, protocol.EncodeHelloResult(features)); err != nil {
@@ -158,6 +159,9 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello protocol.Hello, principal auth.Principal, packet protocol.Packet) bool {
 	switch packet.Code {
 	case protocol.CodePullMetadata:
+		if !principal.Can(access.CapabilityPull) {
+			return s.fail(conn, 2, s.cfg.ServerName+": permission denied for metadata pulls.")
+		}
 		req, err := protocol.DecodePullMetadata(packet.Payload)
 		if err != nil {
 			return s.fail(conn, 0, s.cfg.ServerName+": invalid pull request.")
@@ -190,6 +194,9 @@ func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello proto
 		return s.write(conn, protocol.CodePullMetadataResult, protocol.EncodePullResult(status, found))
 
 	case protocol.CodePushMetadata:
+		if !principal.Can(access.CapabilityPush) {
+			return s.fail(conn, 2, s.cfg.ServerName+": permission denied for metadata pushes.")
+		}
 		req, err := protocol.DecodePushMetadata(packet.Payload)
 		if err != nil {
 			return s.fail(conn, 0, s.cfg.ServerName+": invalid push request.")
@@ -223,6 +230,9 @@ func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello proto
 		if !s.cfg.AllowDeletes {
 			return s.fail(conn, 2, s.cfg.ServerName+": delete command is disabled.")
 		}
+		if !principal.Can(access.CapabilityDeleteHistory) {
+			return s.fail(conn, 2, s.cfg.ServerName+": permission denied for history deletion.")
+		}
 		req, err := protocol.DecodeDeleteHistory(packet.Payload)
 		if err != nil {
 			return s.fail(conn, 0, s.cfg.ServerName+": invalid delete request.")
@@ -236,6 +246,9 @@ func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello proto
 		return s.write(conn, protocol.CodeDeleteHistoryResult, protocol.EncodeDeleteResult(uint32(len(req.FunctionHashes))))
 
 	case protocol.CodeGetFuncHistories:
+		if !principal.Can(access.CapabilityReadHistory) {
+			return s.fail(conn, 2, s.cfg.ServerName+": permission denied for function histories.")
+		}
 		if s.cfg.HistoryLimit == 0 {
 			return s.fail(conn, 4, s.cfg.ServerName+": function histories are disabled.")
 		}

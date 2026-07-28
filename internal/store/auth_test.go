@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/segfaultd/lux/internal/access"
 	"github.com/segfaultd/lux/internal/testdb"
 )
 
@@ -26,7 +27,8 @@ func TestAuthAccountPersistenceLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !alice.Enabled || !alice.PasswordSet || alice.CreatedAt == "" || alice.UpdatedAt == "" {
+	if !alice.Enabled || !alice.PasswordSet || alice.Role != access.RoleContributor ||
+		alice.CreatedAt == "" || alice.UpdatedAt == "" {
 		t.Fatalf("unexpected created account: %#v", alice)
 	}
 	if _, err := database.CreateAuthAccount(ctx, "alice", []byte("hash-two")); !errors.Is(err, ErrAuthAccountExists) {
@@ -55,6 +57,13 @@ func TestAuthAccountPersistenceLifecycle(t *testing.T) {
 	}
 	if _, err := database.UpdateAuthAccountPassword(ctx, "missing", []byte("hash")); !errors.Is(err, ErrAuthAccountNotFound) {
 		t.Fatalf("missing password update returned %v", err)
+	}
+	updated, err = database.UpdateAuthAccountRole(ctx, "alice", access.RoleAdmin)
+	if err != nil || updated.Role != access.RoleAdmin {
+		t.Fatalf("role update %#v: %v", updated, err)
+	}
+	if _, err := database.UpdateAuthAccountRole(ctx, "missing", access.RoleReader); !errors.Is(err, ErrAuthAccountNotFound) {
+		t.Fatalf("missing role update returned %v", err)
 	}
 	if _, err := database.UpdateAuthAccountEnabled(ctx, "missing", false); !errors.Is(err, ErrAuthAccountNotFound) {
 		t.Fatalf("missing enabled update returned %v", err)
@@ -123,6 +132,7 @@ func TestAuthAccountClosedDatabaseErrors(t *testing.T) {
 		{"list", func() error { _, err := database.ListAuthAccounts(ctx); return err }},
 		{"password", func() error { _, err := database.UpdateAuthAccountPassword(ctx, "user", []byte("hash")); return err }},
 		{"enabled", func() error { _, err := database.UpdateAuthAccountEnabled(ctx, "user", false); return err }},
+		{"role", func() error { _, err := database.UpdateAuthAccountRole(ctx, "user", access.RoleReader); return err }},
 		{"delete", func() error { _, err := database.DeleteAuthAccount(ctx, "user"); return err }},
 		{"login", func() error { return database.RecordAuthAccountLogin(ctx, 1) }},
 	}

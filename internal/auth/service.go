@@ -8,6 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/segfaultd/lux/internal/access"
 	"github.com/segfaultd/lux/internal/store"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -28,6 +29,11 @@ var (
 type Principal struct {
 	ID       int64
 	Username string
+	Role     access.Role
+}
+
+func (p Principal) Can(capability access.Capability) bool {
+	return p.Role.Can(capability)
 }
 
 type Service struct {
@@ -57,7 +63,7 @@ func (s *Service) Bootstrap(ctx context.Context, username, password string) erro
 			return err
 		}
 	}
-	_, err = s.store.CreateAuthAccount(ctx, username, passwordHash)
+	_, err = s.store.CreateAuthAccountWithRole(ctx, username, passwordHash, access.RoleAdmin)
 	if errors.Is(err, store.ErrAuthAccountExists) {
 		return nil
 	}
@@ -89,7 +95,7 @@ func (s *Service) Authenticate(ctx context.Context, username, password string) (
 	if err := s.store.RecordAuthAccountLogin(ctx, record.ID); err != nil {
 		return Principal{}, err
 	}
-	return Principal{ID: record.ID, Username: record.Username}, nil
+	return Principal{ID: record.ID, Username: record.Username, Role: record.Role}, nil
 }
 
 func (s *Service) List(ctx context.Context) ([]store.AuthAccount, error) {
@@ -101,7 +107,17 @@ func (s *Service) List(ctx context.Context) ([]store.AuthAccount, error) {
 }
 
 func (s *Service) Create(ctx context.Context, username, password string) (store.AuthAccount, error) {
+	return s.CreateWithRole(ctx, username, password, access.RoleContributor)
+}
+
+func (s *Service) CreateWithRole(
+	ctx context.Context, username, password string, role access.Role,
+) (store.AuthAccount, error) {
 	username, err := normalizeUsername(username)
+	if err != nil {
+		return store.AuthAccount{}, err
+	}
+	role, err = access.ParseRole(string(role))
 	if err != nil {
 		return store.AuthAccount{}, err
 	}
@@ -109,7 +125,7 @@ func (s *Service) Create(ctx context.Context, username, password string) (store.
 	if err != nil {
 		return store.AuthAccount{}, err
 	}
-	return s.store.CreateAuthAccount(ctx, username, passwordHash)
+	return s.store.CreateAuthAccountWithRole(ctx, username, passwordHash, role)
 }
 
 func (s *Service) SetPassword(ctx context.Context, username, password string) (store.AuthAccount, error) {
@@ -130,6 +146,18 @@ func (s *Service) SetEnabled(ctx context.Context, username string, enabled bool)
 		return store.AuthAccount{}, err
 	}
 	return s.store.UpdateAuthAccountEnabled(ctx, username, enabled)
+}
+
+func (s *Service) SetRole(ctx context.Context, username string, role access.Role) (store.AuthAccount, error) {
+	username, err := normalizeUsername(username)
+	if err != nil {
+		return store.AuthAccount{}, err
+	}
+	role, err = access.ParseRole(string(role))
+	if err != nil {
+		return store.AuthAccount{}, err
+	}
+	return s.store.UpdateAuthAccountRole(ctx, username, role)
 }
 
 func (s *Service) Delete(ctx context.Context, username string) (store.AuthAccount, error) {

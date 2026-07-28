@@ -118,6 +118,11 @@ async function loadAccounts() {
     $("accounts-table").innerHTML = data.items.length ? data.items.map((account) => `
       <tr>
         <td><strong>${esc(account.username)}</strong></td>
+        <td><select data-account-role="${esc(account.username)}">
+          <option value="reader" ${account.role === "reader" ? "selected" : ""}>Reader</option>
+          <option value="contributor" ${account.role === "contributor" ? "selected" : ""}>Contributor</option>
+          <option value="admin" ${account.role === "admin" ? "selected" : ""}>Administrator</option>
+        </select></td>
         <td>${account.enabled ? "Enabled" : "Disabled"}</td>
         <td>${account.password_set ? "Set" : "Not set"}</td>
         <td>${esc(date(account.last_login_at))}</td>
@@ -150,6 +155,18 @@ async function accountAction(button) {
     notify(`Account ${username} updated.`);
     await Promise.all([loadAccounts(), refreshStats()]);
   } catch (error) { handleError(error); }
+}
+
+async function setAccountRole(select) {
+  const username = select.dataset.accountRole;
+  try {
+    await api(`/api/v1/accounts/${encodeURIComponent(username)}`, adminOptions("PATCH", { role: select.value }));
+    notify(`Role for ${username} updated.`);
+    await loadAccounts();
+  } catch (error) {
+    handleError(error);
+    await loadAccounts();
+  }
 }
 
 async function loadCollection(resource) {
@@ -736,6 +753,11 @@ document.addEventListener("click", (event) => {
   }
 });
 
+document.addEventListener("change", (event) => {
+  const role = event.target.closest("[data-account-role]");
+  if (role) setAccountRole(role);
+});
+
 document.querySelectorAll("[data-history-view]").forEach((button) => button.addEventListener("click", () => {
   state.history.view = button.dataset.historyView;
   state.history.page = 0;
@@ -818,6 +840,7 @@ $("account-create").addEventListener("submit", async (event) => {
   try {
     await api("/api/v1/accounts", adminOptions("POST", {
       username: $("account-username").value.trim(), password: $("account-password").value,
+      role: $("account-role").value,
     }));
     event.target.reset();
     notify("Account created.");

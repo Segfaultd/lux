@@ -47,11 +47,12 @@
         <form id="account-create" class="toolbar form-row">
           <label>Username <input id="account-username" maxlength="128" required></label>
           <label>Password <input id="account-password" type="password" minlength="8" maxlength="72" autocomplete="new-password" required></label>
+          <label>Role <select id="account-role"><option value="reader">Reader</option><option value="contributor" selected>Contributor</option><option value="admin">Administrator</option></select></label>
           <button type="submit">Create account</button>
           <button type="button" data-reload="accounts">Reload</button>
         </form>
         <div class="table-wrap"><table>
-          <thead><tr><th>Username</th><th>Status</th><th>Password</th><th>Last login</th><th>Created</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Password</th><th>Last login</th><th>Created</th><th>Actions</th></tr></thead>
           <tbody id="accounts-table"></tbody>
         </table></div>
       </section>

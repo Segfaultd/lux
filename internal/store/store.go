@@ -11,6 +11,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/segfaultd/lux/internal/access"
 	"github.com/segfaultd/lux/internal/metadata"
 	"github.com/segfaultd/lux/internal/protocol"
 )
@@ -74,13 +75,14 @@ type PushIdentity struct {
 }
 
 type AuthAccount struct {
-	ID          int64  `json:"id"`
-	Username    string `json:"username"`
-	Enabled     bool   `json:"enabled"`
-	PasswordSet bool   `json:"password_set"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
-	LastLoginAt string `json:"last_login_at,omitempty"`
+	ID          int64       `json:"id"`
+	Username    string      `json:"username"`
+	Role        access.Role `json:"role"`
+	Enabled     bool        `json:"enabled"`
+	PasswordSet bool        `json:"password_set"`
+	CreatedAt   string      `json:"created_at"`
+	UpdatedAt   string      `json:"updated_at"`
+	LastLoginAt string      `json:"last_login_at,omitempty"`
 }
 
 type AuthAccountRecord struct {
@@ -125,11 +127,13 @@ CREATE TABLE IF NOT EXISTS auth_accounts (
   id BIGSERIAL PRIMARY KEY,
   username TEXT NOT NULL,
   password_hash BYTEA,
+  role TEXT NOT NULL DEFAULT 'contributor',
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_login_at TIMESTAMPTZ
 );
+ALTER TABLE auth_accounts ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'contributor';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_accounts_username ON auth_accounts ((lower(username)));
 CREATE TABLE IF NOT EXISTS users (
   id BIGSERIAL PRIMARY KEY,
