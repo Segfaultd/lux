@@ -228,15 +228,18 @@ func (s *Store) RestoreFunctionChange(ctx context.Context, id int64) (HistoryCha
 	}
 	defer tx.Rollback()
 	var functionID, projectID int64
+	var functionHash []byte
 	var name string
 	var length uint32
 	var rawMetadata []byte
 	var score uint32
 	if err := tx.QueryRowContext(ctx, `
-SELECT fc.function_id, fn.database_id, fc.name, fc.length, fc.metadata, fc.score
+SELECT fc.function_id, fn.database_id, fn.checksum, fc.name, fc.length, fc.metadata, fc.score
 FROM function_changes fc
 JOIN functions fn ON fn.id=fc.function_id
-WHERE fc.id=$1`, id).Scan(&functionID, &projectID, &name, &length, &rawMetadata, &score); err != nil {
+WHERE fc.id=$1`, id).Scan(
+		&functionID, &projectID, &functionHash, &name, &length, &rawMetadata, &score,
+	); err != nil {
 		return HistoryChange{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -248,10 +251,15 @@ WHERE id=$5`, name, length, rawMetadata, score, functionID); err != nil {
 	if err != nil {
 		return HistoryChange{}, err
 	}
+	if err := clearAcceptedForHashTx(ctx, tx, functionHash); err != nil {
+		return HistoryChange{}, err
+	}
 	var changeID int64
 	if err := tx.QueryRowContext(ctx, `
-INSERT INTO function_changes (push_id, function_id, name, length, metadata, score, operation)
-VALUES ($1, $2, $3, $4, $5, $6, 'restore')
+INSERT INTO function_changes (
+  push_id, function_id, name, length, metadata, score, accepted, operation
+)
+VALUES ($1, $2, $3, $4, $5, $6, TRUE, 'restore')
 RETURNING id`, pushID, functionID, name, length, rawMetadata, score).Scan(&changeID); err != nil {
 		return HistoryChange{}, err
 	}
@@ -420,6 +428,15 @@ ORDER BY changed_at DESC, id DESC LIMIT 1`, functionID).
 	_, err = tx.ExecContext(ctx, `
 UPDATE functions SET name=$1, length=$2, metadata=$3, score=$4, updated_at=CURRENT_TIMESTAMP
 WHERE id=$5`, name, length, rawMetadata, score, functionID)
+	return err
+}
+
+func clearAcceptedForHashTx(ctx context.Context, tx *sql.Tx, hash []byte) error {
+	_, err := tx.ExecContext(ctx, `
+UPDATE function_changes fc
+SET accepted=FALSE
+FROM functions fn
+WHERE fn.id=fc.function_id AND fn.checksum=$1 AND fc.accepted`, hash)
 	return err
 }
 

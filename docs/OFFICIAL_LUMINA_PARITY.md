@@ -22,7 +22,9 @@ is not a behavioral specification for Lux.
 | Credential-bearing hello and user profile response | Implemented for native IDA protocol versions 3+ |
 | Metadata pull and per-function result codes | Implemented |
 | Metadata push and per-function result codes | Implemented |
-| Replace current metadata only when the submitted metadata is better | In progress |
+| Replace current metadata only when the submitted metadata is better | Implemented |
+| Explicit override and do-not-override push modes | Implemented |
+| Server-side metadata merge push mode | Planned |
 | Immutable push and accepted-change history | Implemented |
 | Function-history retrieval and deletion | Implemented |
 | Function popularity/frequency | In progress |

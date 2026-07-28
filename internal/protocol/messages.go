@@ -18,6 +18,14 @@ const (
 	CodeHelloResult            = 0x31
 )
 
+const (
+	PushModeMask                    uint32 = 0x0F
+	PushOverrideIfBetterOrDifferent uint32 = 0x00
+	PushOverride                    uint32 = 0x01
+	PushDoNotOverride               uint32 = 0x02
+	PushMerge                       uint32 = 0x03
+)
+
 type Credentials struct {
 	Username string
 	Password string
@@ -51,7 +59,7 @@ type PushFunction struct {
 }
 
 type PushMetadata struct {
-	Unknown  uint32
+	Flags    uint32
 	IDBPath  string
 	FilePath string
 	MD5      [16]byte
@@ -149,8 +157,11 @@ func DecodePushMetadata(payload []byte) (PushMetadata, error) {
 	d := NewDecoder(payload)
 	var out PushMetadata
 	var err error
-	if out.Unknown, err = d.DD(); err != nil {
+	if out.Flags, err = d.DD(); err != nil {
 		return out, err
+	}
+	if out.Flags&PushModeMask > PushMerge {
+		return out, fmt.Errorf("unsupported push mode %#x", out.Flags&PushModeMask)
 	}
 	if out.IDBPath, err = d.CString(); err != nil {
 		return out, err

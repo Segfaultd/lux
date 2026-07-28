@@ -235,11 +235,14 @@ CREATE TABLE IF NOT EXISTS function_changes (
   length INTEGER NOT NULL,
   metadata BYTEA NOT NULL,
   score INTEGER NOT NULL DEFAULT 0,
+  accepted BOOLEAN NOT NULL DEFAULT FALSE,
   operation TEXT NOT NULL DEFAULT 'update',
   changed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE function_changes ADD COLUMN IF NOT EXISTS accepted BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS idx_function_changes_function ON function_changes(function_id, changed_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_function_changes_push ON function_changes(push_id);
+CREATE INDEX IF NOT EXISTS idx_function_changes_accepted ON function_changes(accepted, score DESC, id);
 INSERT INTO pushes (
   database_id, source, username, hostname, idb_path, file_path, file_md5,
   submitted_functions, changed_functions, pushed_at
@@ -273,6 +276,24 @@ JOIN LATERAL (
   SELECT id FROM pushes WHERE database_id=db.id ORDER BY id LIMIT 1
 ) p ON TRUE
 WHERE NOT EXISTS (SELECT 1 FROM function_changes fc WHERE fc.function_id=fn.id);
+WITH ranked AS (
+  SELECT fc.id,
+         ROW_NUMBER() OVER (PARTITION BY fn.checksum ORDER BY fc.score DESC, fc.id ASC) AS rank_no
+  FROM function_changes fc
+  JOIN functions fn ON fn.id=fc.function_id
+), pending AS (
+  SELECT ranked.*
+  FROM ranked
+  WHERE NOT EXISTS (
+    SELECT 1 FROM schema_migrations WHERE name='official-metadata-selection'
+  )
+)
+UPDATE function_changes fc
+SET accepted=(pending.rank_no=1)
+FROM pending
+WHERE fc.id=pending.id;
+INSERT INTO schema_migrations(name) VALUES ('official-metadata-selection')
+ON CONFLICT (name) DO NOTHING;
 `
 	_, err := s.db.ExecContext(ctx, schema)
 	return err
@@ -303,11 +324,12 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 
 func (s *Store) Pull(ctx context.Context, hashes [][]byte) ([]*protocol.PullResultFunction, error) {
 	const query = `
-SELECT f.name, f.length, f.metadata,
-       (SELECT COUNT(*) FROM functions p WHERE p.checksum = f.checksum)
-FROM functions f
-WHERE f.checksum = $1
-ORDER BY f.score DESC, f.updated_at DESC, f.id DESC
+SELECT fc.name, fc.length, fc.metadata,
+       (SELECT COUNT(*) FROM functions p WHERE p.checksum = fn.checksum)
+FROM function_changes fc
+JOIN functions fn ON fn.id=fc.function_id
+WHERE fn.checksum = $1
+ORDER BY fc.accepted DESC, fc.score DESC, fc.id ASC
 LIMIT 1`
 	stmt, err := s.db.PrepareContext(ctx, query)
 	if err != nil {
@@ -382,6 +404,26 @@ RETURNING id`, databaseID, identity.Protocol, identity.Username, identity.Hostna
 		if f.Metadata == nil {
 			f.Metadata = []byte{}
 		}
+		if _, err := tx.ExecContext(ctx,
+			"SELECT pg_advisory_xact_lock(hashtextextended(encode($1::bytea, 'hex'), 0))",
+			f.Hash); err != nil {
+			return nil, err
+		}
+		var currentAcceptedScore uint32
+		currentErr := tx.QueryRowContext(ctx, `
+SELECT fc.score
+FROM function_changes fc
+JOIN functions fn ON fn.id=fc.function_id
+WHERE fn.checksum=$1
+ORDER BY fc.accepted DESC, fc.score DESC, fc.id ASC
+LIMIT 1`, f.Hash).Scan(&currentAcceptedScore)
+		hasCurrent := currentErr == nil
+		if currentErr != nil && !errors.Is(currentErr, sql.ErrNoRows) {
+			return nil, currentErr
+		}
+		if !hasCurrent {
+			status[i] = 1
+		}
 		var functionID int64
 		var currentName string
 		var currentLength uint32
@@ -394,14 +436,21 @@ FROM functions WHERE checksum=$1 AND database_id=$2`, f.Hash, databaseID).
 		if err != nil && !isNew {
 			return nil, err
 		}
-		if isNew {
-			status[i] = 1
-		}
 		isChanged := isNew || currentName != f.Name || currentLength != f.Length || !bytes.Equal(currentMetadata, f.Metadata)
 		if !isChanged {
 			continue
 		}
 		score := metadata.Score(f.Metadata)
+		accept := !hasCurrent || score > currentAcceptedScore
+		switch request.Flags & protocol.PushModeMask {
+		case protocol.PushOverride:
+			accept = true
+		case protocol.PushDoNotOverride:
+			accept = !hasCurrent
+		case protocol.PushMerge:
+			// Server-side metadata merging is intentionally conservative until
+			// IDA score fixtures cover the metadata merge operation.
+		}
 		if isNew {
 			functionID, err = upsertID(ctx, tx, `
 INSERT INTO functions (name, length, database_id, checksum, metadata, score)
@@ -415,14 +464,25 @@ WHERE id=$5`, f.Name, f.Length, f.Metadata, score, functionID)
 		if err != nil {
 			return nil, err
 		}
+		if accept {
+			if _, err := tx.ExecContext(ctx, `
+UPDATE function_changes fc
+SET accepted=FALSE
+FROM functions fn
+WHERE fn.id=fc.function_id AND fn.checksum=$1 AND fc.accepted`, f.Hash); err != nil {
+				return nil, err
+			}
+		}
 		operation := "update"
 		if isNew {
 			operation = "create"
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO function_changes (push_id, function_id, name, length, metadata, score, operation)
-VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			pushID, functionID, f.Name, f.Length, f.Metadata, score, operation); err != nil {
+INSERT INTO function_changes (
+  push_id, function_id, name, length, metadata, score, accepted, operation
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			pushID, functionID, f.Name, f.Length, f.Metadata, score, accept, operation); err != nil {
 			return nil, err
 		}
 		changed++
@@ -511,15 +571,25 @@ func (s *Store) ListFunctions(ctx context.Context, search string, limit, offset 
 	}
 	needle := "%" + strings.ToLower(search) + "%"
 	rows, err := s.db.QueryContext(ctx, `
-WITH ranked AS (
-  SELECT f.*, COUNT(*) OVER (PARTITION BY checksum) AS popularity,
-         ROW_NUMBER() OVER (PARTITION BY checksum ORDER BY score DESC, updated_at DESC, id DESC) AS rank_no
-  FROM functions f
+WITH popularity AS (
+  SELECT checksum, COUNT(*) AS value
+  FROM functions
+  GROUP BY checksum
+), ranked AS (
+  SELECT fn.checksum, fc.name, fc.length, fc.score, fc.changed_at,
+         popularity.value AS popularity,
+         ROW_NUMBER() OVER (
+           PARTITION BY fn.checksum
+           ORDER BY fc.accepted DESC, fc.score DESC, fc.id ASC
+         ) AS rank_no
+  FROM function_changes fc
+  JOIN functions fn ON fn.id=fc.function_id
+  JOIN popularity ON popularity.checksum=fn.checksum
 )
-SELECT encode(checksum, 'hex'), name, length, score, popularity, updated_at
+SELECT encode(checksum, 'hex'), name, length, score, popularity, changed_at
 FROM ranked
 WHERE rank_no=1 AND (lower(name) LIKE $1 OR encode(checksum, 'hex') LIKE $2)
-ORDER BY updated_at DESC, name
+ORDER BY changed_at DESC, name
 LIMIT $3 OFFSET $4`, needle, needle, limit, offset)
 	if err != nil {
 		return nil, err

@@ -59,8 +59,8 @@ func TestPushPullAndManagementQueries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status[0] != 1 {
-		t.Fatalf("second database should create a version: %v", status)
+	if status[0] != 0 {
+		t.Fatalf("existing global function should return PDRES_OK: %v", status)
 	}
 
 	got, err := s.Pull(ctx, [][]byte{hash, bytes.Repeat([]byte{0x99}, 16)})
@@ -122,6 +122,78 @@ func TestPushPullAndManagementQueries(t *testing.T) {
 	}
 	if deleted != 2 {
 		t.Fatalf("deleted %d versions, want 2", deleted)
+	}
+}
+
+func TestOfficialPushReplacementModes(t *testing.T) {
+	s, err := Open(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	hash := bytes.Repeat([]byte{0x31}, 16)
+	identity := PushIdentity{
+		LicenseNumber: []byte{1}, LicenseData: []byte{2}, Hostname: "selection-host",
+	}
+	base := protocol.PushMetadata{
+		IDBPath: "selection.i64", FilePath: "selection.bin", Hostname: identity.Hostname,
+	}
+	push := func(name string, comments []string, flags uint32) []uint32 {
+		t.Helper()
+		var encoded protocol.Encoder
+		for _, comment := range comments {
+			encoded.DD(3)
+			encoded.Bytes([]byte(comment))
+		}
+		request := base
+		request.Flags = flags
+		request.Funcs = []protocol.PushFunction{{
+			Name: name, Length: 32, Hash: hash,
+			Metadata: append([]byte(nil), encoded.Payload()...),
+		}}
+		status, err := s.Push(ctx, identity, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return status
+	}
+	pullName := func() string {
+		t.Helper()
+		result, err := s.Pull(ctx, [][]byte{hash})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result) != 1 || result[0] == nil {
+			t.Fatalf("missing pull result: %#v", result)
+		}
+		return result[0].Name
+	}
+
+	if status := push("high", []string{"useful"}, protocol.PushOverrideIfBetterOrDifferent); status[0] != 1 {
+		t.Fatalf("first push status %v", status)
+	}
+	if status := push("lower", nil, protocol.PushOverrideIfBetterOrDifferent); status[0] != 0 {
+		t.Fatalf("existing push status %v", status)
+	}
+	if got := pullName(); got != "high" {
+		t.Fatalf("lower score replaced current metadata: %q", got)
+	}
+	push("equal", []string{"different"}, protocol.PushOverrideIfBetterOrDifferent)
+	if got := pullName(); got != "high" {
+		t.Fatalf("equal score replaced current metadata: %q", got)
+	}
+	push("forced", nil, protocol.PushOverride)
+	if got := pullName(); got != "forced" {
+		t.Fatalf("override mode did not replace current metadata: %q", got)
+	}
+	push("blocked", []string{"one", "two"}, protocol.PushDoNotOverride)
+	if got := pullName(); got != "forced" {
+		t.Fatalf("do-not-override mode replaced current metadata: %q", got)
+	}
+	push("promoted", []string{"one", "two"}, protocol.PushOverrideIfBetterOrDifferent)
+	if got := pullName(); got != "promoted" {
+		t.Fatalf("higher score did not replace current metadata: %q", got)
 	}
 }
 

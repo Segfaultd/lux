@@ -158,12 +158,13 @@ func (s *Store) UpdateFunctionVersion(ctx context.Context, id int64, name string
 	}
 	defer tx.Rollback()
 	var projectID int64
+	var functionHash []byte
 	var currentName string
 	var currentLength uint32
 	var currentMetadata []byte
 	if err := tx.QueryRowContext(ctx,
-		"SELECT database_id, name, length, metadata FROM functions WHERE id=$1", id).
-		Scan(&projectID, &currentName, &currentLength, &currentMetadata); err != nil {
+		"SELECT database_id, checksum, name, length, metadata FROM functions WHERE id=$1", id).
+		Scan(&projectID, &functionHash, &currentName, &currentLength, &currentMetadata); err != nil {
 		return FunctionVersion{}, err
 	}
 	if currentName == name && currentLength == length && bytes.Equal(currentMetadata, rawMetadata) {
@@ -191,9 +192,14 @@ WHERE id=$5`, name, length, rawMetadata, score, id)
 	if err != nil {
 		return FunctionVersion{}, err
 	}
+	if err := clearAcceptedForHashTx(ctx, tx, functionHash); err != nil {
+		return FunctionVersion{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO function_changes (push_id, function_id, name, length, metadata, score, operation)
-VALUES ($1, $2, $3, $4, $5, $6, 'admin-edit')`,
+INSERT INTO function_changes (
+  push_id, function_id, name, length, metadata, score, accepted, operation
+)
+VALUES ($1, $2, $3, $4, $5, $6, TRUE, 'admin-edit')`,
 		pushID, id, name, length, rawMetadata, score); err != nil {
 		return FunctionVersion{}, err
 	}

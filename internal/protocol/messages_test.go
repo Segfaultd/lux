@@ -45,7 +45,7 @@ func TestDecodePushMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Unknown != 1 || got.IDBPath != "database.i64" || got.FilePath != "/samples/file.bin" ||
+	if got.Flags != 1 || got.IDBPath != "database.i64" || got.FilePath != "/samples/file.bin" ||
 		got.MD5[0] != 0x44 || got.Hostname != "host" || len(got.Funcs) != 1 {
 		t.Fatalf("unexpected push header: %#v", got)
 	}
@@ -56,6 +56,14 @@ func TestDecodePushMetadata(t *testing.T) {
 	}
 	if len(got.Trailing) != 2 || got.Trailing[1] != math.MaxUint64 {
 		t.Fatalf("unexpected trailing values: %#v", got.Trailing)
+	}
+}
+
+func TestDecodePushMetadataRejectsUnknownMode(t *testing.T) {
+	var encoded Encoder
+	encoded.DD(4)
+	if _, err := DecodePushMetadata(encoded.Payload()); err == nil {
+		t.Fatal("unsupported push mode was accepted")
 	}
 }
 
