@@ -25,6 +25,7 @@ import (
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/protocol"
+	"github.com/segfaultd/lux/internal/session"
 	"github.com/segfaultd/lux/internal/store"
 	"github.com/segfaultd/lux/internal/testdb"
 )
@@ -126,6 +127,47 @@ func TestHelloAndCommandTimeouts(t *testing.T) {
 		waitConnection(t, done)
 		conn.Close()
 	})
+}
+
+func TestAuthenticatedConnectionSessionLifecycle(t *testing.T) {
+	server := newLuminaTestServer(t, config.Config{
+		HelloWait: time.Second, CommandWait: time.Second,
+	})
+	conn, done := startDirectConnection(server)
+	sendHello(t, conn, 5, &protocol.Credentials{Username: "guest"})
+	if packet := readPacket(t, conn); packet.Code != protocol.CodeHelloResult {
+		t.Fatalf("hello code %#x", packet.Code)
+	}
+	active := waitForSessions(t, server, 1)
+	if active[0].Username != "guest" || active[0].Role != access.RoleAdmin ||
+		active[0].ProtocolVersion != 5 || active[0].RemoteAddress == "" ||
+		active[0].BytesRead == 0 || active[0].BytesWritten == 0 {
+		t.Fatalf("authenticated session %#v", active[0])
+	}
+
+	if err := protocol.WritePacket(conn, protocol.CodePushMetadata, emptyPushRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if packet := readPacket(t, conn); packet.Code != protocol.CodePushMetadataResult {
+		t.Fatalf("push response %#x", packet.Code)
+	}
+	active = waitForSessionOperation(t, server, "push_metadata")
+	if active[0].Hostname != "role-host" || active[0].Requests != 1 ||
+		active[0].CurrentOperation != "" || active[0].BytesRead == 0 || active[0].BytesWritten == 0 {
+		t.Fatalf("completed session request %#v", active[0])
+	}
+
+	if err := protocol.WritePacket(conn, 0x7e, nil); err != nil {
+		t.Fatal(err)
+	}
+	assertFailure(t, readPacket(t, conn), 0, "invalid command")
+	active = waitForSessionOperation(t, server, "unknown_0x7e")
+	if active[0].Requests != 2 || active[0].Errors != 1 {
+		t.Fatalf("failed session request %#v", active[0])
+	}
+	conn.Close()
+	waitConnection(t, done)
+	waitForSessions(t, server, 0)
 }
 
 func TestDynamicDatabaseAuthentication(t *testing.T) {
@@ -636,6 +678,36 @@ func waitConnection(t *testing.T, done <-chan struct{}) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("connection handler did not stop")
+	}
+}
+
+func waitForSessions(t *testing.T, server *Server, count int) []session.Session {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		active := server.Sessions().List()
+		if len(active) == count {
+			return active
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("active sessions = %d, want %d: %#v", len(active), count, active)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitForSessionOperation(t *testing.T, server *Server, operation string) []session.Session {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		active := server.Sessions().List()
+		if len(active) == 1 && active[0].LastOperation == operation {
+			return active
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("last operation did not become %q: %#v", operation, active)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

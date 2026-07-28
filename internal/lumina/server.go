@@ -16,20 +16,27 @@ import (
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/protocol"
+	"github.com/segfaultd/lux/internal/session"
 	"github.com/segfaultd/lux/internal/store"
 )
 
 type Server struct {
-	cfg     config.Config
-	store   *store.Store
-	auth    *auth.Service
-	metrics *observability.Metrics
-	log     *slog.Logger
+	cfg      config.Config
+	store    *store.Store
+	auth     *auth.Service
+	metrics  *observability.Metrics
+	sessions *session.Registry
+	log      *slog.Logger
 }
 
 func New(cfg config.Config, store *store.Store, metrics *observability.Metrics, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, store: store, auth: auth.New(store), metrics: metrics, log: log}
+	return &Server{
+		cfg: cfg, store: store, auth: auth.New(store), metrics: metrics,
+		sessions: session.NewRegistry(), log: log,
+	}
 }
+
+func (s *Server) Sessions() *session.Registry { return s.sessions }
 
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	if s.cfg.TLSCert != "" {
@@ -79,6 +86,8 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 }
 
 func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
+	trackedConn := session.Track(conn)
+	conn = trackedConn
 	remote := conn.RemoteAddr().String()
 	if err := conn.SetReadDeadline(time.Now().Add(s.cfg.HelloWait)); err != nil {
 		s.log.Debug("setting hello deadline", "error", err)
@@ -133,7 +142,14 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			return
 		}
 	}
-	s.log.Debug("Lumina client connected", "remote", remote, "protocol", hello.ProtocolVersion)
+	current := s.sessions.Register(session.Identity{
+		AccountID: principal.ID, Username: principal.Username, Role: principal.Role,
+		RemoteAddress: remote, ProtocolVersion: hello.ProtocolVersion,
+	}, trackedConn)
+	defer s.sessions.Unregister(current.ID)
+	s.log.Debug("Lumina client connected",
+		"session", current.ID, "username", principal.Username, "role", principal.Role,
+		"remote", remote, "protocol", hello.ProtocolVersion)
 	for {
 		if ctx.Err() != nil {
 			return
@@ -150,26 +166,36 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			return
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-		if !s.handlePacket(ctx, conn, hello, principal, packet) {
+		s.sessions.StartRequest(current.ID, operationName(packet.Code))
+		keep := s.handlePacket(ctx, conn, hello, principal, current.ID, packet)
+		s.sessions.FinishRequest(current.ID)
+		if !keep {
 			return
 		}
 	}
 }
 
-func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello protocol.Hello, principal auth.Principal, packet protocol.Packet) bool {
+func (s *Server) handlePacket(
+	parent context.Context,
+	conn net.Conn,
+	hello protocol.Hello,
+	principal auth.Principal,
+	sessionID uint64,
+	packet protocol.Packet,
+) bool {
 	switch packet.Code {
 	case protocol.CodePullMetadata:
 		if !principal.Can(access.CapabilityPull) {
-			return s.fail(conn, 2, s.cfg.ServerName+": permission denied for metadata pulls.")
+			return s.failSession(conn, sessionID, 2, s.cfg.ServerName+": permission denied for metadata pulls.")
 		}
 		req, err := protocol.DecodePullMetadata(packet.Payload)
 		if err != nil {
-			return s.fail(conn, 0, s.cfg.ServerName+": invalid pull request.")
+			return s.failSession(conn, sessionID, 0, s.cfg.ServerName+": invalid pull request.")
 		}
 		hashes := make([][]byte, len(req.Funcs))
 		for i, f := range req.Funcs {
 			if err := protocol.ValidateHash(f.Hash); err != nil {
-				return s.fail(conn, 0, s.cfg.ServerName+": invalid function hash.")
+				return s.failSession(conn, sessionID, 0, s.cfg.ServerName+": invalid function hash.")
 			}
 			hashes[i] = f.Hash
 		}
@@ -178,7 +204,7 @@ func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello proto
 		cancel()
 		if err != nil {
 			s.log.Error("pull metadata", "error", err)
-			return s.fail(conn, 3, s.cfg.ServerName+": database error; try again later.")
+			return s.failSession(conn, sessionID, 3, s.cfg.ServerName+": database error; try again later.")
 		}
 		status := make([]uint32, len(funcs))
 		found := make([]protocol.PullResultFunction, 0, len(funcs))
@@ -195,15 +221,15 @@ func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello proto
 
 	case protocol.CodePushMetadata:
 		if !principal.Can(access.CapabilityPush) {
-			return s.fail(conn, 2, s.cfg.ServerName+": permission denied for metadata pushes.")
+			return s.failSession(conn, sessionID, 2, s.cfg.ServerName+": permission denied for metadata pushes.")
 		}
 		req, err := protocol.DecodePushMetadata(packet.Payload)
 		if err != nil {
-			return s.fail(conn, 0, s.cfg.ServerName+": invalid push request.")
+			return s.failSession(conn, sessionID, 0, s.cfg.ServerName+": invalid push request.")
 		}
 		for _, f := range req.Funcs {
 			if err := protocol.ValidateHash(f.Hash); err != nil {
-				return s.fail(conn, 0, s.cfg.ServerName+": invalid function hash.")
+				return s.failSession(conn, sessionID, 0, s.cfg.ServerName+": invalid function hash.")
 			}
 		}
 		status, err := s.store.Push(parent, store.PushIdentity{
@@ -214,9 +240,10 @@ func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello proto
 			Username:      principal.Username,
 			Protocol:      hello.ProtocolVersion,
 		}, req)
+		s.sessions.SetHostname(sessionID, req.Hostname)
 		if err != nil {
 			s.log.Error("push metadata", "error", err)
-			return s.fail(conn, 3, s.cfg.ServerName+": database error; try again later.")
+			return s.failSession(conn, sessionID, 3, s.cfg.ServerName+": database error; try again later.")
 		}
 		s.metrics.Pushes.Add(uint64(len(status)))
 		for _, v := range status {
@@ -228,33 +255,33 @@ func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello proto
 
 	case protocol.CodeDeleteHistory:
 		if !s.cfg.AllowDeletes {
-			return s.fail(conn, 2, s.cfg.ServerName+": delete command is disabled.")
+			return s.failSession(conn, sessionID, 2, s.cfg.ServerName+": delete command is disabled.")
 		}
 		if !principal.Can(access.CapabilityDeleteHistory) {
-			return s.fail(conn, 2, s.cfg.ServerName+": permission denied for history deletion.")
+			return s.failSession(conn, sessionID, 2, s.cfg.ServerName+": permission denied for history deletion.")
 		}
 		req, err := protocol.DecodeDeleteHistory(packet.Payload)
 		if err != nil {
-			return s.fail(conn, 0, s.cfg.ServerName+": invalid delete request.")
+			return s.failSession(conn, sessionID, 0, s.cfg.ServerName+": invalid delete request.")
 		}
 		deleted, err := s.store.DeleteHashes(parent, req.FunctionHashes)
 		if err != nil {
 			s.log.Error("delete histories", "error", err)
-			return s.fail(conn, 3, s.cfg.ServerName+": database error; try again later.")
+			return s.failSession(conn, sessionID, 3, s.cfg.ServerName+": database error; try again later.")
 		}
 		s.log.Debug("deleted function metadata", "versions", deleted, "hashes", len(req.FunctionHashes))
 		return s.write(conn, protocol.CodeDeleteHistoryResult, protocol.EncodeDeleteResult(uint32(len(req.FunctionHashes))))
 
 	case protocol.CodeGetFuncHistories:
 		if !principal.Can(access.CapabilityReadHistory) {
-			return s.fail(conn, 2, s.cfg.ServerName+": permission denied for function histories.")
+			return s.failSession(conn, sessionID, 2, s.cfg.ServerName+": permission denied for function histories.")
 		}
 		if s.cfg.HistoryLimit == 0 {
-			return s.fail(conn, 4, s.cfg.ServerName+": function histories are disabled.")
+			return s.failSession(conn, sessionID, 4, s.cfg.ServerName+": function histories are disabled.")
 		}
 		req, err := protocol.DecodeGetFuncHistories(packet.Payload)
 		if err != nil {
-			return s.fail(conn, 0, s.cfg.ServerName+": invalid history request.")
+			return s.failSession(conn, sessionID, 0, s.cfg.ServerName+": invalid history request.")
 		}
 		status := make([]uint32, len(req.Funcs))
 		var histories [][]protocol.FunctionHistory
@@ -262,7 +289,7 @@ func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello proto
 			rows, err := s.store.Histories(parent, f.Hash, uint32(s.cfg.HistoryLimit))
 			if err != nil {
 				s.log.Error("get histories", "error", err)
-				return s.fail(conn, 3, s.cfg.ServerName+": database error; try again later.")
+				return s.failSession(conn, sessionID, 3, s.cfg.ServerName+": database error; try again later.")
 			}
 			if len(rows) > 0 {
 				status[i] = 1
@@ -271,7 +298,7 @@ func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello proto
 		}
 		return s.write(conn, protocol.CodeGetFuncHistoriesResult, protocol.EncodeHistoriesResult(status, histories))
 	default:
-		return s.fail(conn, 0, s.cfg.ServerName+": invalid command.")
+		return s.failSession(conn, sessionID, 0, s.cfg.ServerName+": invalid command.")
 	}
 }
 
@@ -286,6 +313,26 @@ func (s *Server) write(conn net.Conn, code byte, payload []byte) bool {
 func (s *Server) fail(conn net.Conn, code uint32, message string) bool {
 	s.metrics.Failures.Add(1)
 	return s.write(conn, protocol.CodeFail, protocol.EncodeFail(code, message))
+}
+
+func (s *Server) failSession(conn net.Conn, sessionID uint64, code uint32, message string) bool {
+	s.sessions.RecordError(sessionID)
+	return s.fail(conn, code, message)
+}
+
+func operationName(code byte) string {
+	switch code {
+	case protocol.CodePullMetadata:
+		return "pull_metadata"
+	case protocol.CodePushMetadata:
+		return "push_metadata"
+	case protocol.CodeDeleteHistory:
+		return "delete_history"
+	case protocol.CodeGetFuncHistories:
+		return "get_function_histories"
+	default:
+		return fmt.Sprintf("unknown_0x%02x", code)
+	}
 }
 
 func (s *Server) writeHTTPBadRequest(conn net.Conn) {
