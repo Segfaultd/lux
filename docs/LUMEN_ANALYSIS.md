@@ -72,7 +72,7 @@ users ──< databases >── files
 - A database associates a user, file, IDB path, and original file path.
 - A function version associates a 16-byte function checksum with one database and stores its name, byte length, opaque IDA metadata, score, and timestamps.
 
-The unique function key is `(checksum, database)`. Re-pushing from the same database updates that version; pushing from another database creates a history entry. Lux preserves these constraints in SQLite and uses cascading foreign keys to keep cleanup deterministic.
+The unique function key is `(checksum, database)`. Re-pushing from the same database updates that version; pushing from another database creates a history entry. Lux preserves these constraints in PostgreSQL and uses cascading foreign keys to keep cleanup deterministic.
 
 ## Metadata selection
 
@@ -96,7 +96,7 @@ Lux retains both read-only API shapes, adds versioned management endpoints, and 
 | Concern | Lumen | Lux |
 |---|---|---|
 | Language/runtime | Rust/Tokio | Go |
-| Database | External PostgreSQL | Embedded SQLite in WAL mode |
+| Database | External PostgreSQL | PostgreSQL via pgx/database/sql |
 | TLS identity | PKCS#12 | PEM certificate and key |
 | HTTP | Optional separate minimal API | Embedded management console and API |
 | Authentication | Hard-coded `guest`, password ignored | Same default; configurable username/password |
@@ -104,4 +104,4 @@ Lux retains both read-only API shapes, adds versioned management endpoints, and 
 | Popularity | Always zero | Stored version count |
 | Schema setup | Diesel migrations run separately | Automatic idempotent startup migration |
 
-The SQLite choice is intended for private team deployments and simple backups. A very large, write-heavy multi-instance deployment would benefit from a PostgreSQL storage implementation; Lux's protocol and storage packages are separated so that can be added without changing the wire layer.
+Lux uses PostgreSQL for durable storage and automatic schema creation. Docker Compose supplies a health-checked PostgreSQL service for single-command deployment, while `LUX_DATABASE_URL` supports managed or independently operated PostgreSQL installations without changing the protocol layer.

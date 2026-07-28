@@ -1,6 +1,6 @@
 # Lux
 
-Lux is a compact, private [IDA Lumina](https://hex-rays.com/products/ida/lumina/) server written in Go. It speaks the Lumina RPC protocol used by IDA 7.2 and later, stores function metadata in a single SQLite file, and serves its management console from the same executable.
+Lux is a compact, private [IDA Lumina](https://hex-rays.com/products/ida/lumina/) server written in Go. It speaks the Lumina RPC protocol used by IDA 7.2 and later, stores function metadata in PostgreSQL, and serves its management console from the same executable.
 
 Lux was independently implemented from the protocol behavior in the sibling `lumen` source tree. It does not depend on Lumen at build or run time. The detailed source analysis and compatibility map are in [`docs/LUMEN_ANALYSIS.md`](docs/LUMEN_ANALYSIS.md).
 
@@ -9,7 +9,7 @@ Lux was independently implemented from the protocol behavior in the sibling `lum
 - Lumina protocol versions 0 through 5 and newer
 - IDA hello/login, metadata pull, metadata push, delete history, and function history RPCs
 - Lumen-compatible best-metadata scoring and selection
-- SQLite persistence with WAL, foreign keys, and automatic schema creation
+- PostgreSQL persistence with connection pooling, foreign keys, and automatic schema creation
 - Optional TLS with a PEM certificate and key
 - Embedded management dashboard with function/file search, metadata histories, decoded comments, and protected deletion
 - JSON management API, Lumen-compatible read-only HTTP routes, health check, and Prometheus metrics
@@ -17,25 +17,29 @@ Lux was independently implemented from the protocol behavior in the sibling `lum
 
 ## Quick start
 
-Go 1.25 or newer is required.
+The recommended startup path boots Lux and PostgreSQL together:
 
 ```sh
-go build -o lux ./cmd/lux
-./lux -admin-token 'choose-a-secret'
+export LUX_ADMIN_TOKEN='choose-a-secret'
+docker compose up --build -d
 ```
 
 The defaults are:
 
 - Lumina protocol: `0.0.0.0:1234`
 - Management console: `http://localhost:8080`
-- Database: `./lux.db`
+- PostgreSQL: `127.0.0.1:55432`, database/user/password `lux` (Lux uses the private Compose network)
 - IDA credentials: username `guest`, any password
 
-Container deployment:
+PostgreSQL data lives in the `postgres-data` Docker volume. Customize its credentials with `LUX_POSTGRES_DB`, `LUX_POSTGRES_USER`, and `LUX_POSTGRES_PASSWORD` before the first startup.
+Compose passes credentials to Lux through PostgreSQL's `PG*` environment variables, so passwords do not need URL escaping.
+
+To run the Go binary directly, Go 1.25 or newer and a reachable PostgreSQL server are required:
 
 ```sh
-export LUX_ADMIN_TOKEN='choose-a-secret'
-docker compose up --build -d
+go build -o lux ./cmd/lux
+LUX_DATABASE_URL='postgres://lux:lux@127.0.0.1:5432/lux?sslmode=disable' \
+  ./lux -admin-token 'choose-a-secret'
 ```
 
 ## Configure IDA
@@ -57,7 +61,7 @@ Every option has a command-line flag and an environment variable:
 |---|---|---:|---|
 | `-lumina-addr` | `LUX_LUMINA_ADDR` | `:1234` | IDA protocol listener |
 | `-http-addr` | `LUX_HTTP_ADDR` | `:8080` | Management listener |
-| `-database` | `LUX_DATABASE` | `lux.db` | SQLite file |
+| `-database-url` | `LUX_DATABASE_URL` | `postgres://lux:lux@127.0.0.1:5432/lux?sslmode=disable` | PostgreSQL connection URL |
 | `-server-name` | `LUX_SERVER_NAME` | `lux` | Name shown to clients |
 | `-username` | `LUX_USERNAME` | `guest` | IDA login username |
 | `-password` | `LUX_PASSWORD` | empty | Empty accepts any password |
@@ -109,15 +113,17 @@ The sibling Lumen project has four important layers:
 3. PostgreSQL records identities, input files, IDA databases, and function metadata versions. Pull chooses the highest-scoring metadata for each 128-bit function hash.
 4. A separate Warp server exposes a small read-only HTTP API and Prometheus metrics.
 
-Lux preserves the behavior that matters to IDA while changing the operations model: a standard-library Go server, embedded UI, and local SQLite database replace the Rust async stack, PostgreSQL, and separate minimal web page. Function versions remain isolated by contributor/database rather than being merged. Pulls deterministically choose score, update time, then row ID.
+Lux preserves the behavior that matters to IDA while changing the application stack: a standard-library Go server and embedded management UI replace the Rust async stack and separate minimal web page. PostgreSQL remains the durable store. Function versions stay isolated by contributor/database rather than being merged. Pulls deterministically choose score, update time, then row ID.
 
 ## Development
 
 ```sh
+docker compose up -d postgres
+export LUX_TEST_DATABASE_URL='postgres://lux:lux@127.0.0.1:55432/lux?sslmode=disable'
 go test ./...
 make coverage
 go vet ./...
 go build ./cmd/lux
 ```
 
-The unit and integration suite covers every package and CI enforces at least 90% statement coverage. No frontend build step is necessary because the console assets are embedded with `go:embed`.
+Database tests create and remove an isolated PostgreSQL schema per test. They are skipped when `LUX_TEST_DATABASE_URL` is not set; CI always supplies it and enforces at least 90% statement coverage. No frontend build step is necessary because the console assets are embedded with `go:embed`.
