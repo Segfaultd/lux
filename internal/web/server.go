@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	authn "github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/store"
@@ -24,13 +26,14 @@ var assets embed.FS
 type Server struct {
 	cfg     config.Config
 	store   *store.Store
+	auth    *authn.Service
 	metrics *observability.Metrics
 	log     *slog.Logger
 	handler http.Handler
 }
 
 func New(cfg config.Config, store *store.Store, metrics *observability.Metrics, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: store, metrics: metrics, log: log}
+	s := &Server{cfg: cfg, store: store, auth: authn.New(store), metrics: metrics, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /metrics", s.prometheus)
@@ -41,6 +44,11 @@ func New(cfg config.Config, store *store.Store, metrics *observability.Metrics, 
 	mux.HandleFunc("DELETE /api/v1/functions/{hash}", s.deleteFunction)
 	mux.HandleFunc("GET /api/v1/files", s.listFiles)
 	mux.HandleFunc("GET /api/v1/files/{md5}/functions", s.getFileFunctions)
+	mux.HandleFunc("GET /api/v1/accounts", s.listAccounts)
+	mux.HandleFunc("POST /api/v1/accounts", s.createAccount)
+	mux.HandleFunc("PUT /api/v1/accounts/{username}/password", s.setAccountPassword)
+	mux.HandleFunc("PATCH /api/v1/accounts/{username}", s.setAccountEnabled)
+	mux.HandleFunc("DELETE /api/v1/accounts/{username}", s.deleteAccount)
 	// Lumen-compatible read-only HTTP routes.
 	mux.HandleFunc("GET /api/files/{md5}", s.legacyFile)
 	mux.HandleFunc("GET /api/funcs/{hash}", s.legacyFunction)
@@ -80,13 +88,123 @@ func (s *Server) prometheus(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"server_name":     s.cfg.ServerName,
-		"lumina_addr":     s.cfg.LuminaAddr,
-		"tls":             s.cfg.TLSCert != "",
-		"allow_deletes":   s.cfg.AllowDeletes,
-		"admin_protected": s.cfg.AdminToken != "",
-		"history_limit":   s.cfg.HistoryLimit,
+		"server_name":        s.cfg.ServerName,
+		"lumina_addr":        s.cfg.LuminaAddr,
+		"tls":                s.cfg.TLSCert != "",
+		"allow_deletes":      s.cfg.AllowDeletes,
+		"admin_protected":    s.cfg.AdminToken != "",
+		"account_management": s.cfg.AdminToken != "",
+		"history_limit":      s.cfg.HistoryLimit,
 	})
+}
+
+func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAccountAdmin(w, r) {
+		return
+	}
+	accounts, err := s.auth.List(r.Context())
+	if err != nil {
+		s.internalError(w, "list authentication accounts", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": accounts})
+}
+
+func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAccountAdmin(w, r) {
+		return
+	}
+	var request struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	account, err := s.auth.Create(r.Context(), request.Username, request.Password)
+	if err != nil {
+		s.writeAuthError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, account)
+}
+
+func (s *Server) setAccountPassword(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAccountAdmin(w, r) {
+		return
+	}
+	var request struct {
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	account, err := s.auth.SetPassword(r.Context(), r.PathValue("username"), request.Password)
+	if err != nil {
+		s.writeAuthError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, account)
+}
+
+func (s *Server) setAccountEnabled(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAccountAdmin(w, r) {
+		return
+	}
+	var request struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if request.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "enabled is required")
+		return
+	}
+	account, err := s.auth.SetEnabled(r.Context(), r.PathValue("username"), *request.Enabled)
+	if err != nil {
+		s.writeAuthError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, account)
+}
+
+func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAccountAdmin(w, r) {
+		return
+	}
+	account, err := s.auth.Delete(r.Context(), r.PathValue("username"))
+	if err != nil {
+		s.writeAuthError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, account)
+}
+
+func (s *Server) requireAccountAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if s.cfg.AdminToken == "" {
+		writeError(w, http.StatusForbidden, "configure an admin token to manage authentication accounts")
+		return false
+	}
+	if !s.authorized(r) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="lux management"`)
+		writeError(w, http.StatusUnauthorized, "valid admin token required")
+		return false
+	}
+	return true
+}
+
+func (s *Server) writeAuthError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, authn.ErrInvalidUsername), errors.Is(err, authn.ErrInvalidPassword):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, store.ErrAuthAccountExists), errors.Is(err, store.ErrLastAuthAccount):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, store.ErrAuthAccountNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	default:
+		s.internalError(w, "manage authentication account", err)
+	}
 }
 
 func (s *Server) getStats(w http.ResponseWriter, r *http.Request) {
@@ -313,4 +431,19 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON request")
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "request must contain one JSON object")
+		return false
+	}
+	return true
 }

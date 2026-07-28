@@ -1,4 +1,4 @@
-const state = { tab: "functions", page: 0, limit: 25, query: "", config: null, selectedHash: null };
+const state = { tab: "functions", page: 0, limit: 25, query: "", config: null, selectedHash: null, pendingAdminAction: null };
 const $ = (id) => document.getElementById(id);
 const fmt = new Intl.NumberFormat();
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -25,6 +25,7 @@ async function boot() {
     $("server-status").textContent = "Server online";
     document.querySelector(".status").classList.add("online");
     $("danger-zone").hidden = !config.allow_deletes;
+    $("accounts-button").hidden = !config.account_management;
   } catch (error) {
     $("server-status").textContent = "Server unavailable";
   }
@@ -138,13 +139,16 @@ $("previous").addEventListener("click", () => { if (state.page > 0) state.page--
 $("next").addEventListener("click", () => { state.page++; loadResults(); });
 $("dialog-close").addEventListener("click", () => $("detail-dialog").close());
 $("detail-dialog").addEventListener("click", (event) => { if (event.target === $("detail-dialog")) $("detail-dialog").close(); });
-$("token-cancel").addEventListener("click", () => $("token-dialog").close());
-$("delete-button").addEventListener("click", () => {
-  if (state.config.admin_protected && !sessionStorage.getItem("luxToken")) $("token-dialog").showModal();
-  else deleteSelected();
-});
+$("token-cancel").addEventListener("click", () => { state.pendingAdminAction = null; $("token-dialog").close(); });
+$("delete-button").addEventListener("click", () => withAdmin(deleteSelected));
 $("token-form").addEventListener("submit", (event) => {
-  event.preventDefault(); sessionStorage.setItem("luxToken", $("token-input").value); $("token-input").value = ""; $("token-dialog").close(); deleteSelected();
+  event.preventDefault();
+  sessionStorage.setItem("luxToken", $("token-input").value);
+  $("token-input").value = "";
+  $("token-dialog").close();
+  const action = state.pendingAdminAction;
+  state.pendingAdminAction = null;
+  if (action) action();
 });
 
 async function deleteSelected() {
@@ -159,6 +163,101 @@ async function deleteSelected() {
     alert(error.message);
   }
 }
+
+function withAdmin(action) {
+  if (state.config?.admin_protected && !sessionStorage.getItem("luxToken")) {
+    state.pendingAdminAction = action;
+    $("token-dialog").showModal();
+    return;
+  }
+  action();
+}
+
+function adminOptions(method = "GET", body) {
+  const token = sessionStorage.getItem("luxToken") || "";
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  return { method, headers, body: body === undefined ? undefined : JSON.stringify(body) };
+}
+
+async function openAccounts() {
+  $("accounts-list").innerHTML = '<div class="empty">Loading login accounts…</div>';
+  if (!$("accounts-dialog").open) $("accounts-dialog").showModal();
+  try {
+    const data = await api("/api/v1/accounts", adminOptions());
+    renderAccounts(data.items);
+  } catch (error) {
+    handleAdminError(error);
+  }
+}
+
+function renderAccounts(accounts) {
+  if (!accounts.length) {
+    $("accounts-list").innerHTML = '<div class="empty">No login accounts configured.</div>';
+    return;
+  }
+  $("accounts-list").innerHTML = accounts.map((account) => `
+    <article class="account-row ${account.enabled ? "" : "disabled"}">
+      <div class="account-identity">
+        <strong>${esc(account.username)}</strong>
+        <small>${account.enabled ? "Enabled" : "Disabled"} · ${account.password_set ? "Password protected" : "Any password accepted"}${account.last_login_at ? ` · Last login ${esc(shortDate(account.last_login_at))}` : ""}</small>
+      </div>
+      <label class="password-reset"><span class="sr-only">New password for ${esc(account.username)}</span><input type="password" autocomplete="new-password" minlength="8" maxlength="72" placeholder="New password" data-password="${esc(account.username)}"></label>
+      <button data-account-action="password" data-username="${esc(account.username)}">Update password</button>
+      <button data-account-action="toggle" data-username="${esc(account.username)}" data-enabled="${account.enabled}">${account.enabled ? "Disable" : "Enable"}</button>
+      <button class="remove-account" data-account-action="delete" data-username="${esc(account.username)}">Delete</button>
+    </article>`).join("");
+  document.querySelectorAll("[data-account-action]").forEach((button) => button.addEventListener("click", () => accountAction(button)));
+}
+
+async function accountAction(button) {
+  const username = button.dataset.username;
+  const action = button.dataset.accountAction;
+  try {
+    if (action === "password") {
+      const input = document.querySelector(`[data-password="${CSS.escape(username)}"]`);
+      if (!input.reportValidity() || !input.value) return;
+      await api(`/api/v1/accounts/${encodeURIComponent(username)}/password`, adminOptions("PUT", { password: input.value }));
+      input.value = "";
+    } else if (action === "toggle") {
+      await api(`/api/v1/accounts/${encodeURIComponent(username)}`, adminOptions("PATCH", { enabled: button.dataset.enabled !== "true" }));
+    } else if (action === "delete") {
+      if (!confirm(`Delete the IDA login account “${username}”? Historical metadata will be preserved.`)) return;
+      await api(`/api/v1/accounts/${encodeURIComponent(username)}`, adminOptions("DELETE"));
+    }
+    await openAccounts();
+  } catch (error) {
+    handleAdminError(error);
+  }
+}
+
+function handleAdminError(error) {
+  if (/token|required|unauthorized/i.test(error.message)) {
+    sessionStorage.removeItem("luxToken");
+    $("accounts-dialog").close();
+    state.pendingAdminAction = openAccounts;
+    $("token-dialog").showModal();
+    return;
+  }
+  alert(error.message);
+}
+
+$("accounts-button").addEventListener("click", () => withAdmin(openAccounts));
+$("accounts-close").addEventListener("click", () => $("accounts-dialog").close());
+$("accounts-dialog").addEventListener("click", (event) => { if (event.target === $("accounts-dialog")) $("accounts-dialog").close(); });
+$("account-create-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await api("/api/v1/accounts", adminOptions("POST", {
+      username: $("account-username").value.trim(),
+      password: $("account-password").value,
+    }));
+    event.target.reset();
+    await openAccounts();
+  } catch (error) {
+    handleAdminError(error);
+  }
+});
 
 function shortDate(value) { return value ? new Date(value).toLocaleDateString() : "—"; }
 boot();

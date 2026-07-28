@@ -35,6 +35,9 @@ header {
 }
 .brand strong { display: block; font-size: 23px; letter-spacing: -.06em; line-height: .9; }
 .brand small { display: block; color: var(--muted); font-size: 11px; letter-spacing: .09em; margin-top: 6px; text-transform: uppercase; }
+.header-actions { display: flex; align-items: center; gap: 22px; }
+.access-button { border: 1px solid var(--ink); background: transparent; padding: 9px 13px; font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.access-button:hover { background: var(--acid); }
 .status { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
 .status i { width: 8px; height: 8px; border-radius: 50%; background: #9c9c91; box-shadow: 0 0 0 4px rgba(156,156,145,.16); }
 .status.online i { background: #71a900; box-shadow: 0 0 0 4px rgba(113,169,0,.16); }
@@ -114,6 +117,20 @@ dialog::backdrop { background: rgba(20, 21, 17, .72); backdrop-filter: blur(3px)
 .dialog-actions { margin-top: 16px; display: flex; justify-content: end; gap: 8px; }
 .dialog-actions button { border: 1px solid var(--line); padding: 10px 16px; background: white; }
 .dialog-actions button:last-child { background: var(--acid); border-color: var(--acid); font-weight: 700; }
+#accounts-dialog { width: min(1100px, calc(100% - 32px)); }
+.accounts-intro { color: var(--muted); margin: 0 34px 24px; }
+.accounts-list { border-top: 1px solid var(--ink); margin: 0 34px; min-height: 100px; }
+.account-row { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(150px, .7fr) auto auto auto; align-items: center; gap: 10px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.account-row.disabled { opacity: .58; }
+.account-identity strong, .account-identity small { display: block; }
+.account-create strong, .account-create small { display: block; }
+.account-identity small, .account-create small { color: var(--muted); margin-top: 5px; }
+.account-row input, .account-create input { width: 100%; border: 1px solid var(--line); background: white; padding: 10px; }
+.account-row button, .account-create button { border: 1px solid var(--line); background: white; padding: 10px 12px; white-space: nowrap; }
+.account-row .remove-account { color: var(--red); border-color: #e1b8b2; }
+.account-create { margin: 28px 34px 34px; padding: 22px; background: #e9e7de; display: grid; grid-template-columns: minmax(170px, 1fr) minmax(140px, .7fr) minmax(160px, .7fr) auto; gap: 14px; align-items: end; }
+.account-create label span { display: block; font-size: 11px; font-weight: 700; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .07em; }
+.account-create button { background: var(--acid); border-color: var(--acid); font-weight: 800; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
 @media (max-width: 850px) {
   .shell { padding: 0 20px; }
@@ -125,10 +142,16 @@ dialog::backdrop { background: rgba(20, 21, 17, .72); backdrop-filter: blur(3px)
   .section-head { align-items: start; gap: 28px; flex-direction: column; }
   .result-row { grid-template-columns: minmax(130px, 1fr) minmax(170px, 1fr) 90px; }
   .result-row span:nth-last-child(-n+2) { display: none; }
+  .account-row { grid-template-columns: 1fr 1fr; }
+  .account-identity { grid-column: 1 / -1; }
+  .account-create { grid-template-columns: 1fr 1fr; }
+  .account-create > div { grid-column: 1 / -1; }
 }
 @media (max-width: 560px) {
   header { height: 78px; }
   .brand small { display: none; }
+  .status span { display: none; }
+  .header-actions { gap: 10px; }
   h1 { font-size: 52px; }
   .intro { font-size: 14px; }
   .stats { grid-template-columns: 1fr; }
@@ -142,4 +165,6 @@ dialog::backdrop { background: rgba(20, 21, 17, .72); backdrop-filter: blur(3px)
   .result-row code { display: block; }
   .result-row span { display: none; }
   .danger-zone { align-items: start; gap: 18px; flex-direction: column; }
+  .account-row, .account-create { grid-template-columns: 1fr; }
+  .account-identity, .account-create > div { grid-column: auto; }
 }

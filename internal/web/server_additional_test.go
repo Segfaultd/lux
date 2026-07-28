@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/protocol"
@@ -32,12 +33,12 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 		status     int
 		bodyPieces []string
 	}{
-		{"index", "/", 200, []string{"Your team’s analysis"}},
-		{"stylesheet", "/styles.css", 200, []string{"--acid"}},
-		{"script", "/app.js", 200, []string{"loadResults"}},
+		{"index", "/", 200, []string{"Your team’s analysis", "IDA login accounts"}},
+		{"stylesheet", "/styles.css", 200, []string{"--acid", ".account-row"}},
+		{"script", "/app.js", 200, []string{"loadResults", "/api/v1/accounts"}},
 		{"health", "/healthz", 200, []string{`"status":"ok"`, `"functions":1`}},
 		{"metrics", "/metrics", 200, []string{"lux_connections_total"}},
-		{"config", "/api/v1/config", 200, []string{`"server_name":"route-test"`, `"tls":true`, `"history_limit":12`}},
+		{"config", "/api/v1/config", 200, []string{`"server_name":"route-test"`, `"tls":true`, `"account_management":false`, `"history_limit":12`}},
 		{"stats", "/api/v1/stats", 200, []string{`"functions":1`, `"versions":1`, `"files":1`}},
 		{"functions", "/api/v1/functions?q=known&limit=2&offset=0", 200, []string{"known_function", `"limit":2`}},
 		{"functions default pagination", "/api/v1/functions?limit=900&offset=-5", 200, []string{`"limit":50`, `"offset":0`}},
@@ -77,6 +78,128 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAccountManagementAPI(t *testing.T) {
+	db, err := store.Open(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	authService := auth.New(db)
+	if err := authService.Bootstrap(context.Background(), "guest", "guest password"); err != nil {
+		t.Fatal(err)
+	}
+
+	unprotected := newWebTestServer(t, config.Config{}, db)
+	response := accountRequest(t, unprotected, http.MethodGet, "/api/v1/accounts", "", "")
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("unconfigured admin token status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	unprotected.Close()
+
+	server := newWebTestServer(t, config.Config{AdminToken: "secret"}, db)
+	defer server.Close()
+	response = accountRequest(t, server, http.MethodGet, "/api/v1/accounts", "", "")
+	if response.StatusCode != http.StatusUnauthorized || response.Header.Get("WWW-Authenticate") == "" {
+		t.Fatalf("unprotected account list status %d", response.StatusCode)
+	}
+	response.Body.Close()
+
+	response = accountRequest(t, server, http.MethodGet, "/api/v1/accounts", "", "secret")
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"username":"guest"`) {
+		t.Fatalf("account list status %d: %s", response.StatusCode, body)
+	}
+
+	response = accountRequest(t, server, http.MethodPost, "/api/v1/accounts", `{"username":"Analyst","password":"correct horse"}`, "secret")
+	if response.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("create account status %d: %s", response.StatusCode, body)
+	}
+	response.Body.Close()
+	if _, err := authService.Authenticate(context.Background(), "analyst", "correct horse"); err != nil {
+		t.Fatalf("new account did not authenticate: %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		status int
+	}{
+		{"duplicate", http.MethodPost, "/api/v1/accounts", `{"username":"analyst","password":"another pass"}`, http.StatusConflict},
+		{"short password", http.MethodPost, "/api/v1/accounts", `{"username":"short","password":"bad"}`, http.StatusBadRequest},
+		{"malformed JSON", http.MethodPost, "/api/v1/accounts", `{`, http.StatusBadRequest},
+		{"unknown JSON field", http.MethodPost, "/api/v1/accounts", `{"username":"x","password":"valid pass","extra":true}`, http.StatusBadRequest},
+		{"multiple JSON values", http.MethodPost, "/api/v1/accounts", `{"username":"x","password":"valid pass"} {}`, http.StatusBadRequest},
+		{"missing enabled", http.MethodPatch, "/api/v1/accounts/Analyst", `{}`, http.StatusBadRequest},
+		{"missing account enable", http.MethodPatch, "/api/v1/accounts/missing", `{"enabled":true}`, http.StatusNotFound},
+		{"malformed password JSON", http.MethodPut, "/api/v1/accounts/Analyst/password", `{`, http.StatusBadRequest},
+		{"missing account password", http.MethodPut, "/api/v1/accounts/missing/password", `{"password":"new password"}`, http.StatusNotFound},
+		{"missing account delete", http.MethodDelete, "/api/v1/accounts/missing", ``, http.StatusNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := accountRequest(t, server, test.method, test.path, test.body, "secret")
+			defer response.Body.Close()
+			if response.StatusCode != test.status {
+				body, _ := io.ReadAll(response.Body)
+				t.Fatalf("status %d, want %d: %s", response.StatusCode, test.status, body)
+			}
+		})
+	}
+
+	response = accountRequest(t, server, http.MethodPut, "/api/v1/accounts/Analyst/password", `{"password":"rotated password"}`, "secret")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("rotate password status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	if _, err := authService.Authenticate(context.Background(), "Analyst", "rotated password"); err != nil {
+		t.Fatalf("rotated account did not authenticate: %v", err)
+	}
+	response = accountRequest(t, server, http.MethodPatch, "/api/v1/accounts/Analyst", `{"enabled":false}`, "secret")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("disable account status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = accountRequest(t, server, http.MethodPatch, "/api/v1/accounts/Analyst", `{"enabled":true}`, "secret")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("enable account status %d", response.StatusCode)
+	}
+	response.Body.Close()
+
+	response = accountRequest(t, server, http.MethodDelete, "/api/v1/accounts/guest", "", "secret")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("delete guest status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = accountRequest(t, server, http.MethodDelete, "/api/v1/accounts/Analyst", "", "secret")
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("delete last account status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = accountRequest(t, server, http.MethodPatch, "/api/v1/accounts/Analyst", `{"enabled":false}`, "secret")
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("disable last account status %d", response.StatusCode)
+	}
+	response.Body.Close()
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	response = accountRequest(t, server, http.MethodGet, "/api/v1/accounts", "", "secret")
+	if response.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("closed database account list status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = accountRequest(t, server, http.MethodPost, "/api/v1/accounts", `{"username":"closed","password":"valid password"}`, "secret")
+	if response.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("closed database account create status %d", response.StatusCode)
+	}
+	response.Body.Close()
 }
 
 func TestManagementDeleteAuthorizationAndOutcomes(t *testing.T) {
@@ -242,6 +365,25 @@ func newWebTestServer(t *testing.T, cfg config.Config, db *store.Store) *httptes
 func deleteRequest(t *testing.T, server *httptest.Server, hash, token string) *http.Response {
 	t.Helper()
 	request, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/v1/functions/"+hash, nil)
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func accountRequest(t *testing.T, server *httptest.Server, method, path, body, token string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(method, server.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}

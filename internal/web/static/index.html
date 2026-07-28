@@ -14,7 +14,10 @@
         <span class="mark">LX</span>
         <span><strong>lux</strong><small>Lumina management</small></span>
       </a>
-      <div class="status"><i></i><span id="server-status">Connecting</span></div>
+      <div class="header-actions">
+        <button id="accounts-button" class="access-button">Manage access</button>
+        <div class="status"><i></i><span id="server-status">Connecting</span></div>
+      </div>
     </header>
 
     <main>
@@ -79,11 +82,29 @@
     </div>
   </dialog>
 
+  <dialog id="accounts-dialog">
+    <div class="dialog-head">
+      <div><p class="eyebrow">LUMINA ACCESS</p><h2>IDA login accounts</h2></div>
+      <button id="accounts-close" aria-label="Close">×</button>
+    </div>
+    <p class="accounts-intro">Changes apply to new IDA connections immediately. Existing sessions remain active until they disconnect.</p>
+    <div id="accounts-list" class="accounts-list"></div>
+    <form id="account-create-form" class="account-create">
+      <div>
+        <strong>Add an account</strong>
+        <small>Passwords must contain 8–72 bytes.</small>
+      </div>
+      <label><span>Username</span><input id="account-username" autocomplete="off" maxlength="128" required></label>
+      <label><span>Password</span><input id="account-password" type="password" autocomplete="new-password" minlength="8" maxlength="72" required></label>
+      <button>Add account</button>
+    </form>
+  </dialog>
+
   <dialog id="token-dialog">
     <form id="token-form">
       <p class="eyebrow">ADMINISTRATOR ACCESS</p>
       <h2>Enter the management token</h2>
-      <p>Lux requires the token configured on the server before it accepts destructive actions.</p>
+      <p>Lux requires the server’s management token before it accepts protected actions.</p>
       <label for="token-input">Admin token</label>
       <input id="token-input" type="password" autocomplete="current-password" required>
       <div class="dialog-actions"><button type="button" id="token-cancel">Cancel</button><button>Continue</button></div>
