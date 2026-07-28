@@ -145,6 +145,39 @@ func TestParseErrorsAndBestEffort(t *testing.T) {
 	if got := ParseBestEffort(nil); got != nil {
 		t.Fatalf("empty metadata should return nil, got %#v", got)
 	}
+
+	var missingOffset protocol.Encoder
+	appendChunk(&missingOffset, 5, nil)
+	var missingByteComment protocol.Encoder
+	var bytePayload protocol.Encoder
+	bytePayload.DD(0)
+	bytePayload.DD(1)
+	appendChunk(&missingByteComment, 5, bytePayload.Payload())
+	var missingPosterior protocol.Encoder
+	var extraPayload protocol.Encoder
+	extraPayload.DD(0)
+	extraPayload.DD(1)
+	extraPayload.Bytes([]byte("anterior"))
+	appendChunk(&missingPosterior, 7, extraPayload.Payload())
+	var missingResetOffset protocol.Encoder
+	var resetPayload protocol.Encoder
+	resetPayload.DD(0)
+	resetPayload.DD(0)
+	resetPayload.Bytes([]byte("first"))
+	resetPayload.DD(0)
+	appendChunk(&missingResetOffset, 5, resetPayload.Payload())
+	for name, payload := range map[string][]byte{
+		"missing offset":       missingOffset.Payload(),
+		"missing byte comment": missingByteComment.Payload(),
+		"missing posterior":    missingPosterior.Payload(),
+		"missing reset offset": missingResetOffset.Payload(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse(payload); err == nil {
+				t.Fatal("expected malformed offset sequence error")
+			}
+		})
+	}
 }
 
 func appendChunk(e *protocol.Encoder, code uint32, data []byte) {

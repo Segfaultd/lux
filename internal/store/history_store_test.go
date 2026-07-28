@@ -64,13 +64,19 @@ FROM pushes ORDER BY id LIMIT 1`).Scan(&protocolVersion, &source, &submitted, &c
 		t.Fatalf("push record = protocol %d source %q submitted %d changed %d",
 			protocolVersion, source, submitted, changed)
 	}
+	var unchangedPushID int64
 	var unchanged int
 	if err := s.db.QueryRowContext(ctx,
-		"SELECT changed_functions FROM pushes ORDER BY id OFFSET 1 LIMIT 1").Scan(&unchanged); err != nil {
+		"SELECT id, changed_functions FROM pushes ORDER BY id OFFSET 1 LIMIT 1").
+		Scan(&unchangedPushID, &unchanged); err != nil {
 		t.Fatal(err)
 	}
 	if unchanged != 0 {
 		t.Fatalf("identical push recorded %d changes", unchanged)
+	}
+	unchangedPush, err := s.PushRecord(ctx, unchangedPushID)
+	if err != nil || len(unchangedPush.Changes) != 0 {
+		t.Fatalf("unchanged push detail = %#v, %v", unchangedPush, err)
 	}
 
 	versions, err := s.Function(ctx, bytesToHex(hash))
@@ -104,6 +110,10 @@ FROM pushes ORDER BY id LIMIT 1`).Scan(&protocolVersion, &source, &submitted, &c
 	}
 	if operation != "admin-edit" {
 		t.Fatalf("admin operation = %q", operation)
+	}
+	deleted, err := s.DeletePush(ctx, unchangedPushID)
+	if err != nil || !deleted.Found || deleted.DeletedChanges != 0 {
+		t.Fatalf("delete unchanged push = %#v, %v", deleted, err)
 	}
 }
 

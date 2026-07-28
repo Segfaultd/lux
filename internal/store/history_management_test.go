@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/segfaultd/lux/internal/metadata"
 	"github.com/segfaultd/lux/internal/protocol"
 	"github.com/segfaultd/lux/internal/testdb"
 )
@@ -144,5 +145,82 @@ func TestHistoryQueriesDiffRestoreAndDelete(t *testing.T) {
 	}
 	if _, err := s.RestoreFunctionChange(ctx, 999999); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("missing restore error = %v", err)
+	}
+}
+
+func TestHistoryDiffFieldSelection(t *testing.T) {
+	base := HistoryChange{
+		Name: "same", Length: 1, Score: 2, Metadata: "aa",
+		Comments: []metadata.Comment{{Type: "function", Text: "before"}},
+	}
+	if fields := diffChanges(&base, base); len(fields) != 0 {
+		t.Fatalf("identical diff = %#v", fields)
+	}
+	commentsChanged := base
+	commentsChanged.Comments = []metadata.Comment{{Type: "function", Text: "after"}}
+	fields := diffChanges(&base, commentsChanged)
+	if len(fields) != 1 || fields[0].Field != "comments" {
+		t.Fatalf("comment diff = %#v", fields)
+	}
+}
+
+func TestDeleteOnlyHistoryChangeRemovesCurrentFunction(t *testing.T) {
+	s, err := Open(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	hash := bytes.Repeat([]byte{0xf1}, 16)
+	if _, err := s.Push(ctx, PushIdentity{Hostname: "single"}, protocol.PushMetadata{
+		IDBPath: "single.i64", FilePath: "single.bin", MD5: [16]byte{0xf2},
+		Funcs: []protocol.PushFunction{{Name: "only_revision", Hash: hash}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := s.ListHistory(ctx, HistoryFilter{}, 10, 0)
+	if err != nil || len(changes) != 1 {
+		t.Fatalf("changes = %#v, %v", changes, err)
+	}
+	deleted, err := s.DeleteFunctionChange(ctx, changes[0].ID)
+	if err != nil || !deleted.Found {
+		t.Fatalf("delete = %#v, %v", deleted, err)
+	}
+	stats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Functions != 0 || stats.Versions != 0 || stats.Databases != 0 ||
+		stats.Pushes != 0 || stats.HistoryRecords != 0 {
+		t.Fatalf("orphan state = %#v", stats)
+	}
+}
+
+func TestEmptyPushProjectDetail(t *testing.T) {
+	s, err := Open(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	if _, err := s.Push(ctx, PushIdentity{Hostname: "empty"}, protocol.PushMetadata{
+		IDBPath: "empty.i64", FilePath: "empty.bin", MD5: [16]byte{0xe1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := s.ListProjects(ctx, "empty.i64", 10, 0)
+	if err != nil || len(projects) != 1 {
+		t.Fatalf("projects = %#v, %v", projects, err)
+	}
+	project, err := s.Project(ctx, projects[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.FunctionVersions == nil || len(project.FunctionVersions) != 0 {
+		t.Fatalf("empty project versions = %#v", project.FunctionVersions)
+	}
+	deleted, err := s.DeleteProject(ctx, project.ID)
+	if err != nil || !deleted.Found || deleted.DeletedVersions != 0 {
+		t.Fatalf("delete empty project = %#v, %v", deleted, err)
 	}
 }

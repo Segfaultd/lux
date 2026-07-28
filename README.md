@@ -9,9 +9,10 @@ Lux was independently implemented from the protocol behavior in the sibling `lum
 - Lumina wire formats 0 through 5 and newer; authenticated operation requires credential-capable protocol version 3+
 - IDA hello/login, metadata pull, metadata push, delete history, and function history RPCs
 - Lumen-compatible best-metadata scoring and selection
+- Immutable push and per-function revision history with native IDA history responses
 - PostgreSQL persistence with connection pooling, foreign keys, and automatic schema creation
 - Optional TLS with a PEM certificate and key
-- Embedded administration console for accounts, IDB projects, files, functions, raw metadata versions, decoded comments, and protected mutations
+- Embedded administration console for accounts, IDB projects, pushes, revision diffs, files, functions, raw metadata versions, decoded comments, restore, and protected deletion
 - JSON management API, Lumen-compatible read-only HTTP routes, health check, and Prometheus metrics
 - One static, CGO-free binary and a small scratch-based container image
 
@@ -103,6 +104,13 @@ IDA pins the Lumina server certificate. Copy the public certificate to `hexrays.
 | `DELETE` | `/api/v1/functions/{hash}` | Delete all versions |
 | `GET` | `/api/v1/files?q=` | Search source files |
 | `GET` | `/api/v1/files/{md5}/functions` | List a file's functions |
+| `GET` | `/api/v1/pushes?q=` | Search immutable native and administrative pushes |
+| `GET` | `/api/v1/pushes/{id}` | Inspect one push and all of its changed functions |
+| `DELETE` | `/api/v1/pushes/{id}` | Delete a push and reconcile affected functions |
+| `GET` | `/api/v1/history?q=` | Search function revisions |
+| `GET` | `/api/v1/history/{id}` | Inspect a revision and its previous-value diff |
+| `POST` | `/api/v1/history/{id}/restore` | Restore a revision as a new current revision |
+| `DELETE` | `/api/v1/history/{id}` | Delete a revision and reconcile its function |
 | `GET` | `/api/v1/projects?q=` | Search contributed IDB projects |
 | `GET` | `/api/v1/projects/{id}` | Inspect a project and its function versions |
 | `PATCH` | `/api/v1/projects/{id}` | Change a project's file or IDB path |
@@ -116,6 +124,8 @@ IDA pins the Lumina server certificate. Copy the public certificate to `hexrays.
 | `DELETE` | `/api/v1/accounts/{username}` | Remove an account |
 
 Deletion must be enabled with `LUX_ALLOW_DELETES=true`. Account management always requires a configured admin token, and all other mutations require it when configured. Send `Authorization: Bearer <token>`; the browser console keeps it only in session storage.
+
+Push and history searches accept `q`, `username`, `project_id`, `from`, and `to`. History additionally accepts `hash` and `push_id`. Timestamps use RFC3339. Native pushes are recorded even when they contain no changed functions; only actual metadata changes create revisions. Restoring a revision creates a new auditable revision instead of rewriting history.
 
 Compatibility aliases are available at `GET /api/files/{md5}` and `GET /api/funcs/{hash}`.
 
