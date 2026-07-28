@@ -6,7 +6,7 @@ Lux was independently implemented from the protocol behavior in the sibling `lum
 
 ## What it supports
 
-- Lumina protocol versions 0 through 5 and newer
+- Lumina wire formats 0 through 5 and newer; authenticated operation requires credential-capable protocol version 3+
 - IDA hello/login, metadata pull, metadata push, delete history, and function history RPCs
 - Lumen-compatible best-metadata scoring and selection
 - PostgreSQL persistence with connection pooling, foreign keys, and automatic schema creation
@@ -29,7 +29,7 @@ The defaults are:
 - Lumina protocol: `0.0.0.0:1234`
 - Management console: `http://localhost:8080`
 - PostgreSQL: `127.0.0.1:55432`, database/user/password `lux` (Lux uses the private Compose network)
-- IDA credentials: username `guest`, any password
+- Initial IDA credentials: username `guest`, password `change-me`
 
 PostgreSQL data lives in the `postgres-data` Docker volume. Customize its credentials with `LUX_POSTGRES_DB`, `LUX_POSTGRES_USER`, and `LUX_POSTGRES_PASSWORD` before the first startup.
 Compose passes credentials to Lux through PostgreSQL's `PG*` environment variables, so passwords do not need URL escaping.
@@ -49,7 +49,7 @@ In IDA 8.1 or later, open **Options → General → Lumina**, select **Use a pri
 - Host: the Lux host
 - Port: `1234` (or your configured port)
 - Username: `guest`
-- Password: any value unless `LUX_PASSWORD` is configured
+- Password: `change-me` with the default Compose configuration
 
 For plaintext operation, launch IDA with `LUMINA_TLS=false` in its environment. For older IDA releases, set `LUMINA_HOST`, `LUMINA_PORT`, and `LUMINA_TLS = NO` in `ida.cfg` or `idauser.cfg`.
 
@@ -63,8 +63,8 @@ Every option has a command-line flag and an environment variable:
 | `-http-addr` | `LUX_HTTP_ADDR` | `:8080` | Management listener |
 | `-database-url` | `LUX_DATABASE_URL` | `postgres://lux:lux@127.0.0.1:5432/lux?sslmode=disable` | PostgreSQL connection URL |
 | `-server-name` | `LUX_SERVER_NAME` | `lux` | Name shown to clients |
-| `-username` | `LUX_USERNAME` | `guest` | IDA login username |
-| `-password` | `LUX_PASSWORD` | empty | Empty accepts any password |
+| `-username` | `LUX_USERNAME` | `guest` | Initial IDA account, only used when the account table is empty |
+| `-password` | `LUX_PASSWORD` | empty | Initial password; empty accepts any password until rotated |
 | `-admin-token` | `LUX_ADMIN_TOKEN` | empty | Bearer token for web deletion |
 | `-allow-deletes` | `LUX_ALLOW_DELETES` | `false` | Enable RPC and web deletion |
 | `-history-limit` | `LUX_HISTORY_LIMIT` | `50` | Histories per hash; 0 disables |
@@ -72,6 +72,12 @@ Every option has a command-line flag and an environment variable:
 | `-tls-key` | `LUX_TLS_KEY` | empty | PEM private key |
 
 Set `LUX_LOG_LEVEL=debug` for protocol and request diagnostics.
+
+### IDA login accounts
+
+Lumina usernames and bcrypt password hashes are stored in PostgreSQL. On the first startup, Lux creates the initial account from `LUX_USERNAME` and `LUX_PASSWORD`; later environment changes do not overwrite database-managed credentials.
+
+Open **Manage access** in the management console to add accounts, rotate passwords, enable or disable access, and remove accounts without restarting Lux. The management token is required. Lux prevents disabling or deleting the final enabled account, and historical metadata remains attached to its original username even if that account is later removed. Changes affect new IDA connections; already-connected clients remain active until disconnect.
 
 ### TLS and IDA certificate pinning
 
@@ -97,8 +103,12 @@ IDA pins the Lumina server certificate. Copy the public certificate to `hexrays.
 | `DELETE` | `/api/v1/functions/{hash}` | Delete all versions |
 | `GET` | `/api/v1/files?q=` | Search source files |
 | `GET` | `/api/v1/files/{md5}/functions` | List a file's functions |
+| `GET`, `POST` | `/api/v1/accounts` | List or create IDA login accounts |
+| `PUT` | `/api/v1/accounts/{username}/password` | Rotate an account password |
+| `PATCH` | `/api/v1/accounts/{username}` | Enable or disable an account |
+| `DELETE` | `/api/v1/accounts/{username}` | Remove an account |
 
-Deletion must be enabled with `LUX_ALLOW_DELETES=true`. If an admin token is configured, send `Authorization: Bearer <token>`; the browser console keeps it only in session storage.
+Deletion must be enabled with `LUX_ALLOW_DELETES=true`. Account management always requires a configured admin token. Send `Authorization: Bearer <token>`; the browser console keeps it only in session storage.
 
 Compatibility aliases are available at `GET /api/files/{md5}` and `GET /api/funcs/{hash}`.
 

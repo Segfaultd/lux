@@ -53,9 +53,9 @@ Lux has golden tests using the exact serializer example in Lumen's source as wel
 | `0x30` | server | Function histories | Supported |
 | `0x31` | server | Protocol-v5+ hello result and feature flags | Supported |
 
-Protocol versions 0–4 receive `OK` after hello. Versions 5 and newer receive `HelloResult`. Lumen advertises feature bit `0x02` when deletion is enabled; Lux does the same.
+Authenticated protocol versions 3–4 receive `OK` after hello. Versions 5 and newer receive `HelloResult`. Versions 0–2 cannot carry credentials and are rejected by Lux's authentication layer. Lumen advertises feature bit `0x02` when deletion is enabled; Lux does the same.
 
-Lumen accepts only the username `guest` when credentials are present and does not validate the password. Lux has equivalent defaults and optionally lets an operator enforce both values.
+Lumen accepts only the username `guest` when credentials are present and does not validate the password. Lux requires credentials and authenticates database-managed, case-insensitive usernames against bcrypt password hashes. Operators can add, disable, rotate, and remove accounts at runtime.
 
 ## Persistent model
 
@@ -73,6 +73,8 @@ users ──< databases >── files
 - A function version associates a 16-byte function checksum with one database and stores its name, byte length, opaque IDA metadata, score, and timestamps.
 
 The unique function key is `(checksum, database)`. Re-pushing from the same database updates that version; pushing from another database creates a history entry. Lux preserves these constraints in PostgreSQL and uses cascading foreign keys to keep cleanup deterministic.
+
+Lux adds an `auth_accounts` table for runtime-managed Lumina credentials. Each database contribution stores both the account foreign key and a username snapshot, so deleting a login account does not erase historical attribution.
 
 ## Metadata selection
 
@@ -99,7 +101,7 @@ Lux retains both read-only API shapes, adds versioned management endpoints, and 
 | Database | External PostgreSQL | PostgreSQL via pgx/database/sql |
 | TLS identity | PKCS#12 | PEM certificate and key |
 | HTTP | Optional separate minimal API | Embedded management console and API |
-| Authentication | Hard-coded `guest`, password ignored | Same default; configurable username/password |
+| Authentication | Hard-coded `guest`, password ignored | PostgreSQL-backed runtime account management with bcrypt passwords |
 | Best-row ties | Database may return more than one max-rank row | Deterministic single row |
 | Popularity | Always zero | Stored version count |
 | Schema setup | Diesel migrations run separately | Automatic idempotent startup migration |
