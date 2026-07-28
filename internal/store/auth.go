@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"time"
-
-	"github.com/segfaultd/lux/internal/access"
 )
 
 type rowScanner interface {
@@ -20,18 +18,22 @@ func (s *Store) CountAuthAccounts(ctx context.Context) (int64, error) {
 }
 
 func (s *Store) CreateAuthAccount(ctx context.Context, username string, passwordHash []byte) (AuthAccount, error) {
-	return s.CreateAuthAccountWithRole(ctx, username, passwordHash, access.RoleContributor)
+	return s.CreateAuthAccountWithProfile(ctx, username, passwordHash, AuthAccountProfile{})
 }
 
-func (s *Store) CreateAuthAccountWithRole(
-	ctx context.Context, username string, passwordHash []byte, role access.Role,
+func (s *Store) CreateAuthAccountWithProfile(
+	ctx context.Context, username string, passwordHash []byte, profile AuthAccountProfile,
 ) (AuthAccount, error) {
 	row := s.db.QueryRowContext(ctx, `
-INSERT INTO auth_accounts (username, password_hash, role)
-VALUES ($1, $2, $3)
+INSERT INTO auth_accounts (
+  username, password_hash, email, license_id, is_admin, can_delete_history
+)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT ((lower(username))) DO NOTHING
-RETURNING id, username, role, enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at`,
-		username, passwordHash, role)
+RETURNING id, username, email, license_id, is_admin, can_delete_history,
+          enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at`,
+		username, passwordHash, profile.Email, profile.LicenseID,
+		profile.IsAdmin, profile.CanDeleteHistory)
 	account, err := scanAuthAccount(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AuthAccount{}, ErrAuthAccountExists
@@ -44,10 +46,12 @@ func (s *Store) AuthAccountByUsername(ctx context.Context, username string) (Aut
 	var createdAt, updatedAt time.Time
 	var lastLoginAt sql.NullTime
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, username, role, enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at, password_hash
+SELECT id, username, email, license_id, is_admin, can_delete_history,
+       enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at, password_hash
 FROM auth_accounts
 WHERE lower(username)=lower($1)`, username).Scan(
-		&record.ID, &record.Username, &record.Role, &record.Enabled, &record.PasswordSet,
+		&record.ID, &record.Username, &record.Email, &record.LicenseID,
+		&record.IsAdmin, &record.CanDeleteHistory, &record.Enabled, &record.PasswordSet,
 		&createdAt, &updatedAt, &lastLoginAt, &record.PasswordHash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AuthAccountRecord{}, ErrAuthAccountNotFound
@@ -61,7 +65,8 @@ WHERE lower(username)=lower($1)`, username).Scan(
 
 func (s *Store) ListAuthAccounts(ctx context.Context) ([]AuthAccount, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, username, role, enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at
+SELECT id, username, email, license_id, is_admin, can_delete_history,
+       enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at
 FROM auth_accounts
 ORDER BY lower(username), id`)
 	if err != nil {
@@ -84,7 +89,8 @@ func (s *Store) UpdateAuthAccountPassword(ctx context.Context, username string, 
 UPDATE auth_accounts
 SET password_hash=$2, updated_at=CURRENT_TIMESTAMP
 WHERE lower(username)=lower($1)
-RETURNING id, username, role, enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at`,
+RETURNING id, username, email, license_id, is_admin, can_delete_history,
+          enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at`,
 		username, passwordHash))
 	if errors.Is(err, sql.ErrNoRows) {
 		return AuthAccount{}, ErrAuthAccountNotFound
@@ -123,7 +129,8 @@ func (s *Store) UpdateAuthAccountEnabled(ctx context.Context, username string, e
 UPDATE auth_accounts
 SET enabled=$2, updated_at=CURRENT_TIMESTAMP
 WHERE lower(username)=lower($1)
-RETURNING id, username, role, enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at`,
+RETURNING id, username, email, license_id, is_admin, can_delete_history,
+          enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at`,
 		username, enabled))
 	if err != nil {
 		return AuthAccount{}, err
@@ -134,13 +141,25 @@ RETURNING id, username, role, enabled, password_hash IS NOT NULL, created_at, up
 	return account, nil
 }
 
-func (s *Store) UpdateAuthAccountRole(ctx context.Context, username string, role access.Role) (AuthAccount, error) {
+func (s *Store) UpdateAuthAccountProfile(
+	ctx context.Context,
+	username string,
+	email *string,
+	licenseID *string,
+	isAdmin *bool,
+	canDeleteHistory *bool,
+) (AuthAccount, error) {
 	account, err := scanAuthAccount(s.db.QueryRowContext(ctx, `
 UPDATE auth_accounts
-SET role=$2, updated_at=CURRENT_TIMESTAMP
+SET email=COALESCE($2, email),
+    license_id=COALESCE($3, license_id),
+    is_admin=COALESCE($4, is_admin),
+    can_delete_history=COALESCE($5, can_delete_history),
+    updated_at=CURRENT_TIMESTAMP
 WHERE lower(username)=lower($1)
-RETURNING id, username, role, enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at`,
-		username, role))
+RETURNING id, username, email, license_id, is_admin, can_delete_history,
+          enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at`,
+		username, email, licenseID, isAdmin, canDeleteHistory))
 	if errors.Is(err, sql.ErrNoRows) {
 		return AuthAccount{}, ErrAuthAccountNotFound
 	}
@@ -177,7 +196,8 @@ func (s *Store) DeleteAuthAccount(ctx context.Context, username string) (AuthAcc
 	account, err := scanAuthAccount(tx.QueryRowContext(ctx, `
 DELETE FROM auth_accounts
 WHERE lower(username)=lower($1)
-RETURNING id, username, role, enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at`, username))
+RETURNING id, username, email, license_id, is_admin, can_delete_history,
+          enabled, password_hash IS NOT NULL, created_at, updated_at, last_login_at`, username))
 	if err != nil {
 		return AuthAccount{}, err
 	}
@@ -209,7 +229,9 @@ func scanAuthAccount(row rowScanner) (AuthAccount, error) {
 	var account AuthAccount
 	var createdAt, updatedAt time.Time
 	var lastLoginAt sql.NullTime
-	err := row.Scan(&account.ID, &account.Username, &account.Role, &account.Enabled, &account.PasswordSet,
+	err := row.Scan(
+		&account.ID, &account.Username, &account.Email, &account.LicenseID,
+		&account.IsAdmin, &account.CanDeleteHistory, &account.Enabled, &account.PasswordSet,
 		&createdAt, &updatedAt, &lastLoginAt)
 	if err != nil {
 		return AuthAccount{}, err

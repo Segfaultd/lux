@@ -28,7 +28,7 @@ is not a behavioral specification for Lux.
 | Function popularity/frequency | In progress |
 | Popular-functions RPC (`PKT_GET_POP`) | Planned |
 | Server-information RPC (`PKT_GET_LUMINA_INFO`) | Planned |
-| Regular users plus `UF_IS_ADMIN` and `UF_CAN_DEL_HISTORY` flags | In progress |
+| Regular users plus `UF_IS_ADMIN` and `UF_CAN_DEL_HISTORY` flags | Implemented |
 | `lc info`, users, statistics, history, and session administration behavior | Exposed through the management API and console |
 | Wire-compatible `lc` administration protocol | Not yet implemented |
 | Teams/Vault delegated identity | Not implemented |

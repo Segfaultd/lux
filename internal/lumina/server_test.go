@@ -25,7 +25,7 @@ func TestHelloPushPullRoundTrip(t *testing.T) {
 	}
 	defer db.Close()
 	cfg := config.Config{
-		ServerName: "lux-test", Username: "guest", HistoryLimit: 10,
+		ServerName: "lux-test", Username: "guest", Password: "test password", HistoryLimit: 10,
 		HelloWait: time.Second, CommandWait: time.Second, PullWait: time.Second,
 	}
 	if err := auth.New(db).Bootstrap(context.Background(), cfg.Username, cfg.Password); err != nil {

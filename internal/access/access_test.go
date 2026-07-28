@@ -1,45 +1,27 @@
 package access
 
-import (
-	"errors"
-	"testing"
-)
+import "testing"
 
-func TestParseRole(t *testing.T) {
-	for input, want := range map[string]Role{
-		"reader": RoleReader, " Contributor ": RoleContributor, "ADMIN": RoleAdmin,
-	} {
-		got, err := ParseRole(input)
-		if err != nil || got != want {
-			t.Fatalf("ParseRole(%q) = %q, %v; want %q", input, got, err, want)
-		}
+func TestOfficialPermissionFlags(t *testing.T) {
+	regular := Permissions{}
+	if !regular.Can(CapabilityPull) || !regular.Can(CapabilityPush) ||
+		!regular.Can(CapabilityReadHistory) {
+		t.Fatal("regular Lumina user cannot use metadata operations")
 	}
-	for _, input := range []string{"", "owner", "read/write"} {
-		if _, err := ParseRole(input); !errors.Is(err, ErrInvalidRole) {
-			t.Fatalf("ParseRole(%q) returned %v", input, err)
-		}
+	if regular.Can(CapabilityDeleteHistory) || regular.Can(CapabilityManage) {
+		t.Fatal("regular Lumina user received administrative permissions")
 	}
-}
 
-func TestRoleCapabilities(t *testing.T) {
-	tests := []struct {
-		role       Role
-		capability Capability
-		want       bool
-	}{
-		{RoleReader, CapabilityPull, true},
-		{RoleReader, CapabilityReadHistory, true},
-		{RoleReader, CapabilityPush, false},
-		{RoleReader, CapabilityDeleteHistory, false},
-		{RoleContributor, CapabilityPush, true},
-		{RoleContributor, CapabilityDeleteHistory, false},
-		{RoleAdmin, CapabilityManage, true},
-		{RoleAdmin, CapabilityDeleteHistory, true},
-		{Role("unknown"), CapabilityPull, false},
+	historyOperator := Permissions{CanDeleteHistory: true}
+	if !historyOperator.Can(CapabilityDeleteHistory) || historyOperator.Can(CapabilityManage) {
+		t.Fatal("history permission did not remain independent from administrator status")
 	}
-	for _, test := range tests {
-		if got := test.role.Can(test.capability); got != test.want {
-			t.Errorf("%s.Can(%s) = %v, want %v", test.role, test.capability, got, test.want)
-		}
+
+	admin := Permissions{IsAdmin: true}
+	if !admin.Can(CapabilityDeleteHistory) || !admin.Can(CapabilityManage) {
+		t.Fatal("administrator did not receive official administrative permissions")
+	}
+	if admin.Can(Capability("unknown")) {
+		t.Fatal("unknown capability was granted")
 	}
 }

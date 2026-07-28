@@ -8,36 +8,36 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/segfaultd/lux/internal/access"
 )
 
 var ErrNotFound = errors.New("session not found")
 
 type Session struct {
-	ID               uint64      `json:"id"`
-	AccountID        int64       `json:"account_id"`
-	Username         string      `json:"username"`
-	Role             access.Role `json:"role"`
-	RemoteAddress    string      `json:"remote_address"`
-	Hostname         string      `json:"hostname,omitempty"`
-	ProtocolVersion  uint32      `json:"protocol_version"`
-	ConnectedAt      time.Time   `json:"connected_at"`
-	LastActivityAt   time.Time   `json:"last_activity_at"`
-	CurrentOperation string      `json:"current_operation,omitempty"`
-	LastOperation    string      `json:"last_operation,omitempty"`
-	Requests         uint64      `json:"requests"`
-	Errors           uint64      `json:"errors"`
-	BytesRead        uint64      `json:"bytes_read"`
-	BytesWritten     uint64      `json:"bytes_written"`
+	ID               uint64    `json:"id"`
+	AccountID        int64     `json:"account_id"`
+	Username         string    `json:"username"`
+	IsAdmin          bool      `json:"is_admin"`
+	CanDeleteHistory bool      `json:"can_delete_history"`
+	RemoteAddress    string    `json:"remote_address"`
+	Hostname         string    `json:"hostname,omitempty"`
+	ProtocolVersion  uint32    `json:"protocol_version"`
+	ConnectedAt      time.Time `json:"connected_at"`
+	LastActivityAt   time.Time `json:"last_activity_at"`
+	CurrentOperation string    `json:"current_operation,omitempty"`
+	LastOperation    string    `json:"last_operation,omitempty"`
+	Requests         uint64    `json:"requests"`
+	Errors           uint64    `json:"errors"`
+	BytesRead        uint64    `json:"bytes_read"`
+	BytesWritten     uint64    `json:"bytes_written"`
 }
 
 type Identity struct {
-	AccountID       int64
-	Username        string
-	Role            access.Role
-	RemoteAddress   string
-	ProtocolVersion uint32
+	AccountID        int64
+	Username         string
+	IsAdmin          bool
+	CanDeleteHistory bool
+	RemoteAddress    string
+	ProtocolVersion  uint32
 }
 
 type Connection struct {
@@ -91,14 +91,15 @@ func (r *Registry) Register(identity Identity, conn *Connection) Session {
 	defer r.mu.Unlock()
 	r.nextID++
 	current := Session{
-		ID:              r.nextID,
-		AccountID:       identity.AccountID,
-		Username:        identity.Username,
-		Role:            identity.Role,
-		RemoteAddress:   identity.RemoteAddress,
-		ProtocolVersion: identity.ProtocolVersion,
-		ConnectedAt:     now,
-		LastActivityAt:  now,
+		ID:               r.nextID,
+		AccountID:        identity.AccountID,
+		Username:         identity.Username,
+		IsAdmin:          identity.IsAdmin,
+		CanDeleteHistory: identity.CanDeleteHistory,
+		RemoteAddress:    identity.RemoteAddress,
+		ProtocolVersion:  identity.ProtocolVersion,
+		ConnectedAt:      now,
+		LastActivityAt:   now,
 	}
 	r.sessions[current.ID] = &entry{session: current, conn: conn}
 	return current

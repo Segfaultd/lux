@@ -11,7 +11,6 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/segfaultd/lux/internal/access"
 	"github.com/segfaultd/lux/internal/metadata"
 	"github.com/segfaultd/lux/internal/protocol"
 )
@@ -75,14 +74,24 @@ type PushIdentity struct {
 }
 
 type AuthAccount struct {
-	ID          int64       `json:"id"`
-	Username    string      `json:"username"`
-	Role        access.Role `json:"role"`
-	Enabled     bool        `json:"enabled"`
-	PasswordSet bool        `json:"password_set"`
-	CreatedAt   string      `json:"created_at"`
-	UpdatedAt   string      `json:"updated_at"`
-	LastLoginAt string      `json:"last_login_at,omitempty"`
+	ID               int64  `json:"id"`
+	Username         string `json:"username"`
+	Email            string `json:"email"`
+	LicenseID        string `json:"license_id"`
+	IsAdmin          bool   `json:"is_admin"`
+	CanDeleteHistory bool   `json:"can_delete_history"`
+	Enabled          bool   `json:"enabled"`
+	PasswordSet      bool   `json:"password_set"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
+	LastLoginAt      string `json:"last_login_at,omitempty"`
+}
+
+type AuthAccountProfile struct {
+	Email            string
+	LicenseID        string
+	IsAdmin          bool
+	CanDeleteHistory bool
 }
 
 type AuthAccountRecord struct {
@@ -127,13 +136,35 @@ CREATE TABLE IF NOT EXISTS auth_accounts (
   id BIGSERIAL PRIMARY KEY,
   username TEXT NOT NULL,
   password_hash BYTEA,
-  role TEXT NOT NULL DEFAULT 'contributor',
+  email TEXT NOT NULL DEFAULT '',
+  license_id TEXT NOT NULL DEFAULT '',
+  is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+  can_delete_history BOOLEAN NOT NULL DEFAULT FALSE,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_login_at TIMESTAMPTZ
 );
-ALTER TABLE auth_accounts ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'contributor';
+ALTER TABLE auth_accounts ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT '';
+ALTER TABLE auth_accounts ADD COLUMN IF NOT EXISTS license_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE auth_accounts ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE auth_accounts ADD COLUMN IF NOT EXISTS can_delete_history BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  name TEXT PRIMARY KEY,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name='official-user-flags') THEN
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema=current_schema() AND table_name='auth_accounts' AND column_name='role'
+    ) THEN
+      EXECUTE 'UPDATE auth_accounts SET is_admin=(role=''admin''), can_delete_history=(role=''admin'')';
+    END IF;
+    INSERT INTO schema_migrations(name) VALUES ('official-user-flags');
+  END IF;
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_accounts_username ON auth_accounts ((lower(username)));
 CREATE TABLE IF NOT EXISTS users (
   id BIGSERIAL PRIMARY KEY,

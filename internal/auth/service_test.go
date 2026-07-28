@@ -23,15 +23,16 @@ func TestDynamicAccountLifecycleAndAuthentication(t *testing.T) {
 	if accounts, err := service.List(ctx); err != nil || len(accounts) != 0 {
 		t.Fatalf("initial accounts %#v: %v", accounts, err)
 	}
-	if err := service.Bootstrap(ctx, "guest", ""); err != nil {
+	if err := service.Bootstrap(ctx, "guest", "guest password"); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.Bootstrap(ctx, "ignored", "ignored-password"); err != nil {
 		t.Fatal(err)
 	}
-	principal, err := service.Authenticate(ctx, " GUEST ", "any-password")
+	principal, err := service.Authenticate(ctx, " GUEST ", "guest password")
 	if err != nil || principal.Username != "guest" || principal.ID == 0 ||
-		principal.Role != access.RoleAdmin || !principal.Can(access.CapabilityManage) {
+		!principal.IsAdmin || !principal.CanDeleteHistory ||
+		!principal.Can(access.CapabilityManage) {
 		t.Fatalf("bootstrap authentication: %#v, %v", principal, err)
 	}
 
@@ -39,7 +40,7 @@ func TestDynamicAccountLifecycleAndAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !account.Enabled || !account.PasswordSet || account.Role != access.RoleContributor {
+	if !account.Enabled || !account.PasswordSet || account.IsAdmin || account.CanDeleteHistory {
 		t.Fatalf("unexpected account: %#v", account)
 	}
 	if _, err := service.Create(ctx, "analyst", "another password"); !errors.Is(err, store.ErrAuthAccountExists) {
@@ -80,14 +81,21 @@ func TestDynamicAccountLifecycleAndAuthentication(t *testing.T) {
 	if _, err := service.SetEnabled(ctx, "Analyst", true); err != nil {
 		t.Fatal(err)
 	}
-	account, err = service.SetRole(ctx, "Analyst", access.RoleReader)
-	if err != nil || account.Role != access.RoleReader {
-		t.Fatalf("set role: %#v, %v", account, err)
+	email := "analyst@example.test"
+	licenseID := "ab-1234-cdef-90"
+	admin := false
+	canDeleteHistory := true
+	account, err = service.SetProfile(
+		ctx, "Analyst", &email, &licenseID, &admin, &canDeleteHistory)
+	if err != nil || account.Email != email || account.LicenseID != "AB-1234-CDEF-90" ||
+		account.IsAdmin || !account.CanDeleteHistory {
+		t.Fatalf("set profile: %#v, %v", account, err)
 	}
 	principal, err = service.Authenticate(ctx, "Analyst", "rotated password")
-	if err != nil || principal.Role != access.RoleReader ||
-		principal.Can(access.CapabilityPush) || !principal.Can(access.CapabilityPull) {
-		t.Fatalf("reader principal: %#v, %v", principal, err)
+	if err != nil || principal.IsAdmin || !principal.CanDeleteHistory ||
+		!principal.Can(access.CapabilityPush) || !principal.Can(access.CapabilityPull) ||
+		!principal.Can(access.CapabilityDeleteHistory) {
+		t.Fatalf("regular principal: %#v, %v", principal, err)
 	}
 
 	accounts, err := service.List(ctx)
@@ -147,17 +155,30 @@ func TestAccountValidationAndDatabaseErrors(t *testing.T) {
 	if _, err := service.SetEnabled(ctx, "bad/name", true); !errors.Is(err, ErrInvalidUsername) {
 		t.Fatalf("invalid enable username returned %v", err)
 	}
-	if _, err := service.SetRole(ctx, "missing", access.RoleReader); !errors.Is(err, store.ErrAuthAccountNotFound) {
-		t.Fatalf("missing role update returned %v", err)
+	admin := true
+	if _, err := service.SetProfile(ctx, "missing", nil, nil, &admin, nil); !errors.Is(err, store.ErrAuthAccountNotFound) {
+		t.Fatalf("missing profile update returned %v", err)
 	}
-	if _, err := service.SetRole(ctx, "valid", access.Role("owner")); !errors.Is(err, access.ErrInvalidRole) {
-		t.Fatalf("invalid role update returned %v", err)
+	badEmail := "bad\nmail"
+	if _, err := service.SetProfile(ctx, "valid", &badEmail, nil, nil, nil); !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("invalid email update returned %v", err)
 	}
-	if _, err := service.SetRole(ctx, "bad/name", access.RoleReader); !errors.Is(err, ErrInvalidUsername) {
-		t.Fatalf("invalid role username returned %v", err)
+	badLicense := "1234"
+	if _, err := service.SetProfile(ctx, "valid", nil, &badLicense, nil, nil); !errors.Is(err, ErrInvalidLicenseID) {
+		t.Fatalf("invalid license update returned %v", err)
 	}
-	if _, err := service.CreateWithRole(ctx, "owner", "valid password", access.Role("owner")); !errors.Is(err, access.ErrInvalidRole) {
-		t.Fatalf("invalid create role returned %v", err)
+	if _, err := service.SetProfile(ctx, "bad/name", nil, nil, &admin, nil); !errors.Is(err, ErrInvalidUsername) {
+		t.Fatalf("invalid profile username returned %v", err)
+	}
+	if _, err := service.CreateWithProfile(ctx, "owner", "valid password", store.AuthAccountProfile{
+		Email: badEmail,
+	}); !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("invalid create email returned %v", err)
+	}
+	if _, err := service.CreateWithProfile(ctx, "owner", "valid password", store.AuthAccountProfile{
+		LicenseID: badLicense,
+	}); !errors.Is(err, ErrInvalidLicenseID) {
+		t.Fatalf("invalid create license returned %v", err)
 	}
 	if _, err := service.Delete(ctx, "missing"); !errors.Is(err, store.ErrAuthAccountNotFound) {
 		t.Fatalf("missing delete returned %v", err)
@@ -192,6 +213,31 @@ func TestBootstrapWithPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := service.Authenticate(ctx, "secure", "secure password"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPasswordlessAccountCannotAuthenticate(t *testing.T) {
+	database, err := store.Open(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := New(database)
+	ctx := context.Background()
+	account, err := service.CreateWithProfile(ctx, "pending", "", store.AuthAccountProfile{
+		Email: "pending@example.test",
+	})
+	if err != nil || account.PasswordSet {
+		t.Fatalf("create passwordless account: %#v, %v", account, err)
+	}
+	if _, err := service.Authenticate(ctx, "pending", "anything"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("passwordless authentication returned %v", err)
+	}
+	if _, err := service.SetPassword(ctx, "pending", "assigned password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Authenticate(ctx, "pending", "assigned password"); err != nil {
 		t.Fatal(err)
 	}
 }

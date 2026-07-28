@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/segfaultd/lux/internal/access"
 	authn "github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/metadata"
@@ -157,24 +156,28 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Role     string `json:"role"`
+		Username         string `json:"username"`
+		Password         string `json:"password"`
+		Email            string `json:"email"`
+		LicenseID        string `json:"license_id"`
+		IsAdmin          bool   `json:"is_admin"`
+		CanDeleteHistory bool   `json:"can_delete_history"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	role := access.RoleContributor
-	if request.Role != "" {
-		role = access.Role(request.Role)
-	}
-	account, err := s.auth.CreateWithRole(r.Context(), request.Username, request.Password, role)
+	account, err := s.auth.CreateWithProfile(
+		r.Context(), request.Username, request.Password, store.AuthAccountProfile{
+			Email: request.Email, LicenseID: request.LicenseID,
+			IsAdmin: request.IsAdmin, CanDeleteHistory: request.CanDeleteHistory,
+		})
 	if err != nil {
 		s.writeAuthError(w, err)
 		return
 	}
 	s.log.Info("authentication account created",
-		"account_id", account.ID, "username", account.Username, "role", account.Role)
+		"account_id", account.ID, "username", account.Username,
+		"is_admin", account.IsAdmin, "can_delete_history", account.CanDeleteHistory)
 	writeJSON(w, http.StatusCreated, account)
 }
 
@@ -205,33 +208,46 @@ func (s *Server) setAccountEnabled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Enabled *bool   `json:"enabled"`
-		Role    *string `json:"role"`
+		Enabled          *bool   `json:"enabled"`
+		Email            *string `json:"email"`
+		LicenseID        *string `json:"license_id"`
+		IsAdmin          *bool   `json:"is_admin"`
+		CanDeleteHistory *bool   `json:"can_delete_history"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	if (request.Enabled == nil) == (request.Role == nil) {
-		writeError(w, http.StatusBadRequest, "exactly one of enabled or role is required")
+	hasProfile := request.Email != nil || request.LicenseID != nil ||
+		request.IsAdmin != nil || request.CanDeleteHistory != nil
+	if request.Enabled == nil && !hasProfile {
+		writeError(w, http.StatusBadRequest, "at least one account field is required")
 		return
 	}
 	var account store.AuthAccount
 	var err error
-	if request.Role != nil {
-		account, err = s.auth.SetRole(r.Context(), r.PathValue("username"), access.Role(*request.Role))
-	} else {
+	if request.Enabled != nil {
 		account, err = s.auth.SetEnabled(r.Context(), r.PathValue("username"), *request.Enabled)
+		if err != nil {
+			s.writeAuthError(w, err)
+			return
+		}
+	}
+	if hasProfile {
+		account, err = s.auth.SetProfile(
+			r.Context(), r.PathValue("username"), request.Email, request.LicenseID,
+			request.IsAdmin, request.CanDeleteHistory)
 	}
 	if err != nil {
 		s.writeAuthError(w, err)
 		return
 	}
 	terminated := 0
-	if request.Role != nil || (request.Enabled != nil && !*request.Enabled) {
+	if hasProfile || (request.Enabled != nil && !*request.Enabled) {
 		terminated = s.sessions.TerminateAccount(account.ID)
 	}
 	s.log.Info("authentication account updated",
-		"account_id", account.ID, "username", account.Username, "role", account.Role,
+		"account_id", account.ID, "username", account.Username,
+		"is_admin", account.IsAdmin, "can_delete_history", account.CanDeleteHistory,
 		"enabled", account.Enabled, "terminated_sessions", terminated)
 	writeJSON(w, http.StatusOK, account)
 }
@@ -316,8 +332,8 @@ func (s *Server) requireAccountAdmin(w http.ResponseWriter, r *http.Request) boo
 
 func (s *Server) writeAuthError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, authn.ErrInvalidUsername), errors.Is(err, authn.ErrInvalidPassword),
-		errors.Is(err, access.ErrInvalidRole):
+	case errors.Is(err, authn.ErrInvalidUsername), errors.Is(err, authn.ErrInvalidEmail),
+		errors.Is(err, authn.ErrInvalidLicenseID), errors.Is(err, authn.ErrInvalidPassword):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, store.ErrAuthAccountExists), errors.Is(err, store.ErrLastAuthAccount):
 		writeError(w, http.StatusConflict, err.Error())

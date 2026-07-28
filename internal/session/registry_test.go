@@ -6,8 +6,6 @@ import (
 	"net"
 	"testing"
 	"time"
-
-	"github.com/segfaultd/lux/internal/access"
 )
 
 func TestTrackedConnectionCountsTraffic(t *testing.T) {
@@ -52,10 +50,11 @@ func TestRegistryLifecycleAndSnapshots(t *testing.T) {
 	defer client.Close()
 	tracked := Track(server)
 	current := registry.Register(Identity{
-		AccountID: 42, Username: "analyst", Role: access.RoleContributor,
+		AccountID: 42, Username: "analyst", CanDeleteHistory: true,
 		RemoteAddress: "192.0.2.4:12345", ProtocolVersion: 5,
 	}, tracked)
-	if current.ID != 1 || current.ConnectedAt.Location() != time.UTC {
+	if current.ID != 1 || current.ConnectedAt.Location() != time.UTC ||
+		!current.CanDeleteHistory || current.IsAdmin {
 		t.Fatalf("registered session %#v", current)
 	}
 
@@ -99,7 +98,7 @@ func TestRegistryTermination(t *testing.T) {
 		client, server := net.Pipe()
 		clients = append(clients, client)
 		current := registry.Register(Identity{
-			AccountID: accountID, Username: "user", Role: access.RoleReader,
+			AccountID: accountID, Username: "user",
 		}, Track(server))
 		if current.ID != uint64(i+1) {
 			t.Fatalf("session id %d", current.ID)
@@ -128,7 +127,7 @@ func TestRegistryTermination(t *testing.T) {
 	caseClient, caseServer := net.Pipe()
 	clients = append(clients, caseClient)
 	registry.Register(Identity{
-		AccountID: 9, Username: "CaseUser", Role: access.RoleReader,
+		AccountID: 9, Username: "CaseUser",
 	}, Track(caseServer))
 	if terminated := registry.TerminateUsername("caseuser"); terminated != 1 {
 		t.Fatalf("username termination matched %d sessions", terminated)

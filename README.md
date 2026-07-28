@@ -65,7 +65,7 @@ Every option has a command-line flag and an environment variable:
 | `-database-url` | `LUX_DATABASE_URL` | `postgres://lux:lux@127.0.0.1:5432/lux?sslmode=disable` | PostgreSQL connection URL |
 | `-server-name` | `LUX_SERVER_NAME` | `lux` | Name shown to clients |
 | `-username` | `LUX_USERNAME` | `guest` | Initial IDA account, only used when the account table is empty |
-| `-password` | `LUX_PASSWORD` | empty | Initial password; empty accepts any password until rotated |
+| `-password` | `LUX_PASSWORD` | empty | Initial password; an empty value creates a disabled-for-login account until a password is assigned |
 | `-admin-token` | `LUX_ADMIN_TOKEN` | empty | Bearer token for management changes |
 | `-allow-deletes` | `LUX_ALLOW_DELETES` | `false` | Enable RPC and web deletion |
 | `-history-limit` | `LUX_HISTORY_LIMIT` | `50` | Histories per hash; 0 disables |
@@ -76,9 +76,9 @@ Set `LUX_LOG_LEVEL=debug` for protocol and request diagnostics.
 
 ### IDA login accounts
 
-Lumina usernames, roles, and bcrypt password hashes are stored in PostgreSQL. On the first startup, Lux creates an administrator from `LUX_USERNAME` and `LUX_PASSWORD`; later environment changes do not overwrite database-managed credentials. Accounts created later default to the contributor role.
+Lumina usernames, profile fields, privilege flags, and bcrypt password hashes are stored in PostgreSQL. On the first startup, Lux creates an administrator with history-deletion permission from `LUX_USERNAME` and `LUX_PASSWORD`; later environment changes do not overwrite database-managed credentials. Accounts created later are regular Lumina users.
 
-Open **Authentication** in the management console to add accounts, change roles, rotate passwords, enable or disable access, and remove accounts without restarting Lux. Readers can pull metadata and inspect history, contributors can additionally push metadata, and administrators can additionally delete native history when deletion is globally enabled. The management token is required. Lux prevents disabling or deleting the final enabled account, and historical metadata remains attached to its original username even if that account is later removed. Password rotation, role changes, disablement, and deletion immediately disconnect every active session for the affected account.
+Open **Authentication** in the management console to add accounts, edit email and license ID, assign the official administrator and history-deletion flags, rotate passwords, enable or disable access, and remove accounts without restarting Lux. Every regular user can pull, push, and inspect metadata history. `is_admin` grants server administration and `can_delete_history` independently permits native history deletion when deletion is globally enabled. The management token is required. Lux prevents disabling or deleting the final enabled account, and historical metadata remains attached to its original username even if that account is later removed. Password rotation, privilege/profile changes, disablement, and deletion immediately disconnect every active session for the affected account. Accounts created without a password cannot authenticate until one is assigned.
 
 ### TLS and IDA certificate pinning
 
@@ -122,7 +122,7 @@ IDA pins the Lumina server certificate. Copy the public certificate to `hexrays.
 | `PATCH` | `/api/v1/metadata/{id}/structured` | Set, remove, or append metadata chunks |
 | `GET`, `POST` | `/api/v1/accounts` | List or create IDA login accounts |
 | `PUT` | `/api/v1/accounts/{username}/password` | Rotate an account password |
-| `PATCH` | `/api/v1/accounts/{username}` | Change an account role or enabled state |
+| `PATCH` | `/api/v1/accounts/{username}` | Change account profile, privilege flags, or enabled state |
 | `DELETE` | `/api/v1/accounts/{username}` | Remove an account |
 | `DELETE` | `/api/v1/accounts/{username}/sessions` | Terminate every active session for an account |
 | `GET` | `/api/v1/sessions` | List authenticated Lumina sessions and activity |

@@ -1,18 +1,5 @@
 package access
 
-import (
-	"errors"
-	"strings"
-)
-
-type Role string
-
-const (
-	RoleReader      Role = "reader"
-	RoleContributor Role = "contributor"
-	RoleAdmin       Role = "admin"
-)
-
 type Capability string
 
 const (
@@ -23,28 +10,20 @@ const (
 	CapabilityManage        Capability = "manage"
 )
 
-var ErrInvalidRole = errors.New("role must be reader, contributor, or admin")
-
-func ParseRole(value string) (Role, error) {
-	role := Role(strings.ToLower(strings.TrimSpace(value)))
-	switch role {
-	case RoleReader, RoleContributor, RoleAdmin:
-		return role, nil
-	default:
-		return "", ErrInvalidRole
-	}
+// Permissions mirrors the flags exposed by the official Lumina SDK.
+type Permissions struct {
+	IsAdmin          bool `json:"is_admin"`
+	CanDeleteHistory bool `json:"can_delete_history"`
 }
 
-func (r Role) Can(capability Capability) bool {
-	switch r {
-	case RoleReader:
-		return capability == CapabilityPull || capability == CapabilityReadHistory
-	case RoleContributor:
-		return capability == CapabilityPull ||
-			capability == CapabilityPush ||
-			capability == CapabilityReadHistory
-	case RoleAdmin:
+func (p Permissions) Can(capability Capability) bool {
+	switch capability {
+	case CapabilityPull, CapabilityPush, CapabilityReadHistory:
 		return true
+	case CapabilityDeleteHistory:
+		return p.IsAdmin || p.CanDeleteHistory
+	case CapabilityManage:
+		return p.IsAdmin
 	default:
 		return false
 	}

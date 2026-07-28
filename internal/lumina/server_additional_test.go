@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/segfaultd/lux/internal/access"
 	"github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
@@ -139,7 +138,7 @@ func TestAuthenticatedConnectionSessionLifecycle(t *testing.T) {
 		t.Fatalf("hello code %#x", packet.Code)
 	}
 	active := waitForSessions(t, server, 1)
-	if active[0].Username != "guest" || active[0].Role != access.RoleAdmin ||
+	if active[0].Username != "guest" || !active[0].IsAdmin || !active[0].CanDeleteHistory ||
 		active[0].ProtocolVersion != 5 || active[0].RemoteAddress == "" ||
 		active[0].BytesRead == 0 || active[0].BytesWritten == 0 {
 		t.Fatalf("authenticated session %#v", active[0])
@@ -256,19 +255,21 @@ func TestAuthenticationFailuresAreAudited(t *testing.T) {
 	}
 }
 
-func TestRoleCapabilitiesAreEnforced(t *testing.T) {
+func TestOfficialUserCapabilitiesAreEnforced(t *testing.T) {
 	db, hash := populatedLuminaStore(t)
 	authService := auth.New(db)
 	if err := authService.Bootstrap(context.Background(), "admin", "admin password"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := authService.CreateWithRole(
-		context.Background(), "reader", "reader password", access.RoleReader,
+	if _, err := authService.Create(
+		context.Background(), "regular", "regular password",
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := authService.CreateWithRole(
-		context.Background(), "contributor", "contributor password", access.RoleContributor,
+	if _, err := authService.CreateWithProfile(
+		context.Background(), "deleter", "deleter password", store.AuthAccountProfile{
+			CanDeleteHistory: true,
+		},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -277,47 +278,49 @@ func TestRoleCapabilitiesAreEnforced(t *testing.T) {
 		HelloWait: time.Second, CommandWait: time.Second, PullWait: time.Second,
 	}, db)
 
-	reader, readerDone := startDirectConnection(server)
-	sendHello(t, reader, 5, &protocol.Credentials{Username: "reader", Password: "reader password"})
-	if features := helloFeatures(t, readPacket(t, reader)); features&0x02 != 0 {
-		t.Fatalf("reader received delete feature %#x", features)
+	regular, regularDone := startDirectConnection(server)
+	sendHello(t, regular, 5, &protocol.Credentials{Username: "regular", Password: "regular password"})
+	if features := helloFeatures(t, readPacket(t, regular)); features&0x02 != 0 {
+		t.Fatalf("regular user received delete feature %#x", features)
 	}
-	if err := protocol.WritePacket(reader, protocol.CodePullMetadata, pullRequest(hash)); err != nil {
+	if err := protocol.WritePacket(regular, protocol.CodePullMetadata, pullRequest(hash)); err != nil {
 		t.Fatal(err)
 	}
-	if packet := readPacket(t, reader); packet.Code != protocol.CodePullMetadataResult {
-		t.Fatalf("reader pull response %#x", packet.Code)
+	if packet := readPacket(t, regular); packet.Code != protocol.CodePullMetadataResult {
+		t.Fatalf("regular pull response %#x", packet.Code)
 	}
-	if err := protocol.WritePacket(reader, protocol.CodePushMetadata, emptyPushRequest()); err != nil {
+	if err := protocol.WritePacket(regular, protocol.CodePushMetadata, emptyPushRequest()); err != nil {
 		t.Fatal(err)
 	}
-	assertFailure(t, readPacket(t, reader), 2, "permission denied")
-	if err := protocol.WritePacket(reader, protocol.CodeGetFuncHistories, historyRequest(hash)); err != nil {
+	if packet := readPacket(t, regular); packet.Code != protocol.CodePushMetadataResult {
+		t.Fatalf("regular push response %#x", packet.Code)
+	}
+	if err := protocol.WritePacket(regular, protocol.CodeGetFuncHistories, historyRequest(hash)); err != nil {
 		t.Fatal(err)
 	}
-	if packet := readPacket(t, reader); packet.Code != protocol.CodeGetFuncHistoriesResult {
-		t.Fatalf("reader history response %#x", packet.Code)
+	if packet := readPacket(t, regular); packet.Code != protocol.CodeGetFuncHistoriesResult {
+		t.Fatalf("regular history response %#x", packet.Code)
 	}
-	reader.Close()
-	waitConnection(t, readerDone)
+	if err := protocol.WritePacket(regular, protocol.CodeDeleteHistory, deleteRequest(hash)); err != nil {
+		t.Fatal(err)
+	}
+	assertFailure(t, readPacket(t, regular), 2, "permission denied")
+	regular.Close()
+	waitConnection(t, regularDone)
 
-	contributor, contributorDone := startDirectConnection(server)
-	sendHello(t, contributor, 5, &protocol.Credentials{Username: "contributor", Password: "contributor password"})
-	if features := helloFeatures(t, readPacket(t, contributor)); features&0x02 != 0 {
-		t.Fatalf("contributor received delete feature %#x", features)
+	deleter, deleterDone := startDirectConnection(server)
+	sendHello(t, deleter, 5, &protocol.Credentials{Username: "deleter", Password: "deleter password"})
+	if features := helloFeatures(t, readPacket(t, deleter)); features&0x02 == 0 {
+		t.Fatalf("history deleter did not receive delete feature %#x", features)
 	}
-	if err := protocol.WritePacket(contributor, protocol.CodePushMetadata, emptyPushRequest()); err != nil {
+	if err := protocol.WritePacket(deleter, protocol.CodeDeleteHistory, deleteRequest(hash)); err != nil {
 		t.Fatal(err)
 	}
-	if packet := readPacket(t, contributor); packet.Code != protocol.CodePushMetadataResult {
-		t.Fatalf("contributor push response %#x", packet.Code)
+	if packet := readPacket(t, deleter); packet.Code != protocol.CodeDeleteHistoryResult {
+		t.Fatalf("history deleter response %#x", packet.Code)
 	}
-	if err := protocol.WritePacket(contributor, protocol.CodeDeleteHistory, deleteRequest(hash)); err != nil {
-		t.Fatal(err)
-	}
-	assertFailure(t, readPacket(t, contributor), 2, "permission denied")
-	contributor.Close()
-	waitConnection(t, contributorDone)
+	deleter.Close()
+	waitConnection(t, deleterDone)
 
 	admin, adminDone := startDirectConnection(server)
 	sendHello(t, admin, 5, &protocol.Credentials{Username: "admin", Password: "admin password"})
@@ -627,6 +630,9 @@ func testServerWithStore(t *testing.T, cfg config.Config, db *store.Store) *Serv
 	if cfg.Username == "" {
 		cfg.Username = "guest"
 	}
+	if cfg.Password == "" {
+		cfg.Password = "test password"
+	}
 	if err := auth.New(db).Bootstrap(context.Background(), cfg.Username, cfg.Password); err != nil {
 		t.Fatal(err)
 	}
@@ -663,6 +669,9 @@ func sendHello(t *testing.T, conn net.Conn, version uint32, creds *protocol.Cred
 	e.Fixed([]byte{1, 2, 3, 4, 5, 6})
 	e.DD(0)
 	if creds != nil {
+		if creds.Password == "" {
+			creds = &protocol.Credentials{Username: creds.Username, Password: "test password"}
+		}
 		e.CString(creds.Username)
 		e.CString(creds.Password)
 	}

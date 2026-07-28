@@ -145,12 +145,14 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		}
 	}
 	current := s.sessions.Register(session.Identity{
-		AccountID: principal.ID, Username: principal.Username, Role: principal.Role,
+		AccountID: principal.ID, Username: principal.Username,
+		IsAdmin: principal.IsAdmin, CanDeleteHistory: principal.CanDeleteHistory,
 		RemoteAddress: remote, ProtocolVersion: hello.ProtocolVersion,
 	}, trackedConn)
 	defer s.sessions.Unregister(current.ID)
 	s.log.Debug("Lumina client connected",
-		"session", current.ID, "username", principal.Username, "role", principal.Role,
+		"session", current.ID, "username", principal.Username,
+		"is_admin", principal.IsAdmin, "can_delete_history", principal.CanDeleteHistory,
 		"remote", remote, "protocol", hello.ProtocolVersion)
 	for {
 		if ctx.Err() != nil {

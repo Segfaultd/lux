@@ -119,11 +119,16 @@ async function loadAccounts() {
     $("accounts-table").innerHTML = data.items.length ? data.items.map((account) => `
       <tr>
         <td><strong>${esc(account.username)}</strong></td>
-        <td><select data-account-role="${esc(account.username)}">
-          <option value="reader" ${account.role === "reader" ? "selected" : ""}>Reader</option>
-          <option value="contributor" ${account.role === "contributor" ? "selected" : ""}>Contributor</option>
-          <option value="admin" ${account.role === "admin" ? "selected" : ""}>Administrator</option>
-        </select></td>
+        <td><input type="email" value="${esc(account.email || "")}" maxlength="320"
+          data-account-field="email" data-username="${esc(account.username)}"></td>
+        <td><input value="${esc(account.license_id || "")}" maxlength="16"
+          data-account-field="license_id" data-username="${esc(account.username)}"></td>
+        <td>
+          <label><input type="checkbox" data-account-field="is_admin"
+            data-username="${esc(account.username)}" ${account.is_admin ? "checked" : ""}> Admin</label><br>
+          <label><input type="checkbox" data-account-field="can_delete_history"
+            data-username="${esc(account.username)}" ${account.can_delete_history ? "checked" : ""}> Delete history</label>
+        </td>
         <td>${account.enabled ? "Enabled" : "Disabled"}</td>
         <td>${account.password_set ? "Set" : "Not set"}</td>
         <td>${esc(date(account.last_login_at))}</td>
@@ -172,13 +177,15 @@ async function loadSessions() {
     const data = await api("/api/v1/sessions", adminOptions());
     const query = state.sessionQuery.toLocaleLowerCase();
     const sessions = data.items.filter((item) => !query || [
-      item.username, item.role, item.remote_address, item.hostname,
+      item.username, item.is_admin ? "admin" : "regular",
+      item.can_delete_history ? "delete history" : "",
+      item.remote_address, item.hostname,
       item.current_operation, item.last_operation,
     ].some((value) => String(value || "").toLocaleLowerCase().includes(query)));
     body.innerHTML = sessions.length ? sessions.map((item) => `
       <tr>
         <td>${item.id}</td>
-        <td><strong>${esc(item.username)}</strong><br>${esc(item.role)}</td>
+        <td><strong>${esc(item.username)}</strong><br>${item.is_admin ? "Administrator" : "Regular user"}${item.can_delete_history ? " / delete history" : ""}</td>
         <td><code>${esc(item.remote_address)}</code><br>${esc(item.hostname || "—")}</td>
         <td>${item.protocol_version}</td>
         <td>${esc(date(item.connected_at))}</td>
@@ -204,11 +211,13 @@ async function terminateSession(button) {
   } catch (error) { handleError(error); }
 }
 
-async function setAccountRole(select) {
-  const username = select.dataset.accountRole;
+async function setAccountField(input) {
+  const username = input.dataset.username;
+  const field = input.dataset.accountField;
+  const value = input.type === "checkbox" ? input.checked : input.value.trim();
   try {
-    await api(`/api/v1/accounts/${encodeURIComponent(username)}`, adminOptions("PATCH", { role: select.value }));
-    notify(`Role for ${username} updated.`);
+    await api(`/api/v1/accounts/${encodeURIComponent(username)}`, adminOptions("PATCH", { [field]: value }));
+    notify(`Account ${username} updated.`);
     await loadAccounts();
   } catch (error) {
     handleError(error);
@@ -808,8 +817,8 @@ document.addEventListener("click", (event) => {
 });
 
 document.addEventListener("change", (event) => {
-  const role = event.target.closest("[data-account-role]");
-  if (role) setAccountRole(role);
+  const field = event.target.closest("[data-account-field]");
+  if (field) setAccountField(field);
 });
 
 document.querySelectorAll("[data-history-view]").forEach((button) => button.addEventListener("click", () => {
@@ -905,7 +914,10 @@ $("account-create").addEventListener("submit", async (event) => {
   try {
     await api("/api/v1/accounts", adminOptions("POST", {
       username: $("account-username").value.trim(), password: $("account-password").value,
-      role: $("account-role").value,
+      email: $("account-email").value.trim(),
+      license_id: $("account-license-id").value.trim(),
+      is_admin: $("account-is-admin").checked,
+      can_delete_history: $("account-can-delete-history").checked,
     }));
     event.target.reset();
     notify("Account created.");

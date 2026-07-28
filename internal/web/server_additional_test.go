@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/segfaultd/lux/internal/access"
 	"github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
@@ -392,11 +391,14 @@ func TestAccountManagementAPI(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK ||
 		!strings.Contains(string(body), `"username":"guest"`) ||
-		!strings.Contains(string(body), `"role":"admin"`) {
+		!strings.Contains(string(body), `"is_admin":true`) ||
+		!strings.Contains(string(body), `"can_delete_history":true`) {
 		t.Fatalf("account list status %d: %s", response.StatusCode, body)
 	}
 
-	response = accountRequest(t, server, http.MethodPost, "/api/v1/accounts", `{"username":"Analyst","password":"correct horse","role":"reader"}`, "secret")
+	response = accountRequest(t, server, http.MethodPost, "/api/v1/accounts",
+		`{"username":"Analyst","password":"correct horse","email":"analyst@example.test","license_id":"ab-1234-cdef-90","can_delete_history":true}`,
+		"secret")
 	if response.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(response.Body)
 		t.Fatalf("create account status %d: %s", response.StatusCode, body)
@@ -406,8 +408,9 @@ func TestAccountManagementAPI(t *testing.T) {
 		t.Fatalf("new account did not authenticate: %v", err)
 	}
 	record, err := db.AuthAccountByUsername(context.Background(), "analyst")
-	if err != nil || record.Role != access.RoleReader {
-		t.Fatalf("new account role %#v: %v", record, err)
+	if err != nil || record.IsAdmin || !record.CanDeleteHistory ||
+		record.Email != "analyst@example.test" || record.LicenseID != "AB-1234-CDEF-90" {
+		t.Fatalf("new account profile %#v: %v", record, err)
 	}
 
 	for _, test := range []struct {
@@ -419,15 +422,16 @@ func TestAccountManagementAPI(t *testing.T) {
 	}{
 		{"duplicate", http.MethodPost, "/api/v1/accounts", `{"username":"analyst","password":"another pass"}`, http.StatusConflict},
 		{"short password", http.MethodPost, "/api/v1/accounts", `{"username":"short","password":"bad"}`, http.StatusBadRequest},
-		{"invalid create role", http.MethodPost, "/api/v1/accounts", `{"username":"owner","password":"valid password","role":"owner"}`, http.StatusBadRequest},
+		{"invalid create email", http.MethodPost, "/api/v1/accounts", `{"username":"owner","password":"valid password","email":"bad\u000amail"}`, http.StatusBadRequest},
+		{"invalid create license", http.MethodPost, "/api/v1/accounts", `{"username":"owner","password":"valid password","license_id":"bad"}`, http.StatusBadRequest},
 		{"malformed JSON", http.MethodPost, "/api/v1/accounts", `{`, http.StatusBadRequest},
 		{"unknown JSON field", http.MethodPost, "/api/v1/accounts", `{"username":"x","password":"valid pass","extra":true}`, http.StatusBadRequest},
 		{"multiple JSON values", http.MethodPost, "/api/v1/accounts", `{"username":"x","password":"valid pass"} {}`, http.StatusBadRequest},
 		{"missing enabled", http.MethodPatch, "/api/v1/accounts/Analyst", `{}`, http.StatusBadRequest},
 		{"missing account enable", http.MethodPatch, "/api/v1/accounts/missing", `{"enabled":true}`, http.StatusNotFound},
-		{"both role and enabled", http.MethodPatch, "/api/v1/accounts/Analyst", `{"enabled":true,"role":"admin"}`, http.StatusBadRequest},
-		{"invalid role", http.MethodPatch, "/api/v1/accounts/Analyst", `{"role":"owner"}`, http.StatusBadRequest},
-		{"missing account role", http.MethodPatch, "/api/v1/accounts/missing", `{"role":"reader"}`, http.StatusNotFound},
+		{"invalid profile email", http.MethodPatch, "/api/v1/accounts/Analyst", `{"email":"bad\u000amail"}`, http.StatusBadRequest},
+		{"invalid profile license", http.MethodPatch, "/api/v1/accounts/Analyst", `{"license_id":"bad"}`, http.StatusBadRequest},
+		{"missing account profile", http.MethodPatch, "/api/v1/accounts/missing", `{"is_admin":true}`, http.StatusNotFound},
 		{"malformed password JSON", http.MethodPut, "/api/v1/accounts/Analyst/password", `{`, http.StatusBadRequest},
 		{"missing account password", http.MethodPut, "/api/v1/accounts/missing/password", `{"password":"new password"}`, http.StatusNotFound},
 		{"missing account delete", http.MethodDelete, "/api/v1/accounts/missing", ``, http.StatusNotFound},
@@ -450,9 +454,10 @@ func TestAccountManagementAPI(t *testing.T) {
 	if _, err := authService.Authenticate(context.Background(), "Analyst", "rotated password"); err != nil {
 		t.Fatalf("rotated account did not authenticate: %v", err)
 	}
-	response = accountRequest(t, server, http.MethodPatch, "/api/v1/accounts/Analyst", `{"role":"contributor"}`, "secret")
+	response = accountRequest(t, server, http.MethodPatch, "/api/v1/accounts/Analyst",
+		`{"email":"new@example.test","is_admin":true,"can_delete_history":false}`, "secret")
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("role update status %d", response.StatusCode)
+		t.Fatalf("profile update status %d", response.StatusCode)
 	}
 	response.Body.Close()
 	response = accountRequest(t, server, http.MethodPatch, "/api/v1/accounts/Analyst", `{"enabled":false}`, "secret")
@@ -507,11 +512,11 @@ func TestSessionManagementAPI(t *testing.T) {
 	var clients []net.Conn
 	for _, identity := range []session.Identity{
 		{
-			AccountID: 1, Username: "Analyst", Role: access.RoleContributor,
+			AccountID: 1, Username: "Analyst", CanDeleteHistory: true,
 			RemoteAddress: "192.0.2.10:4567", ProtocolVersion: 5,
 		},
 		{
-			AccountID: 2, Username: "reader", Role: access.RoleReader,
+			AccountID: 2, Username: "regular",
 			RemoteAddress: "192.0.2.11:4568", ProtocolVersion: 4,
 		},
 	} {
@@ -601,9 +606,7 @@ func TestAccountSecurityChangesRevokeSessions(t *testing.T) {
 	if err := authService.Bootstrap(context.Background(), "guest", "guest password"); err != nil {
 		t.Fatal(err)
 	}
-	analyst, err := authService.CreateWithRole(
-		context.Background(), "analyst", "analyst password", access.RoleContributor,
-	)
+	analyst, err := authService.Create(context.Background(), "analyst", "analyst password")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -621,7 +624,8 @@ func TestAccountSecurityChangesRevokeSessions(t *testing.T) {
 	register := func() net.Conn {
 		client, peer := net.Pipe()
 		registry.Register(session.Identity{
-			AccountID: analyst.ID, Username: analyst.Username, Role: analyst.Role,
+			AccountID: analyst.ID, Username: analyst.Username,
+			IsAdmin: analyst.IsAdmin, CanDeleteHistory: analyst.CanDeleteHistory,
 		}, session.Track(peer))
 		return client
 	}
@@ -638,9 +642,9 @@ func TestAccountSecurityChangesRevokeSessions(t *testing.T) {
 
 	client := register()
 	response := accountRequest(t, server, http.MethodPatch,
-		"/api/v1/accounts/analyst", `{"role":"reader"}`, "secret")
+		"/api/v1/accounts/analyst", `{"can_delete_history":true}`, "secret")
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("role change status %d", response.StatusCode)
+		t.Fatalf("privilege change status %d", response.StatusCode)
 	}
 	response.Body.Close()
 	assertRevoked(client)
@@ -679,7 +683,7 @@ func TestAccountSecurityChangesRevokeSessions(t *testing.T) {
 	assertRevoked(client)
 
 	response = accountRequest(t, server, http.MethodPost, "/api/v1/accounts",
-		`{"username":"operator","password":"operator password","role":"admin"}`, "secret")
+		`{"username":"operator","password":"operator password","is_admin":true}`, "secret")
 	response.Body.Close()
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("create status %d", response.StatusCode)
