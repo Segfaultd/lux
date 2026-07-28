@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -31,6 +32,14 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 		t.Fatalf("versions: %#v, %v", versions, err)
 	}
 	versionID := versions[0].ID
+	pushes, err := db.ListPushes(context.Background(), store.PushFilter{}, 10, 0)
+	if err != nil || len(pushes) != 1 {
+		t.Fatalf("pushes: %#v, %v", pushes, err)
+	}
+	changes, err := db.ListHistory(context.Background(), store.HistoryFilter{}, 10, 0)
+	if err != nil || len(changes) != 1 {
+		t.Fatalf("history: %#v, %v", changes, err)
+	}
 	cfg := config.Config{
 		ServerName: "route-test", LuminaAddr: "127.0.0.1:1234",
 		HistoryLimit: 12, TLSCert: "configured.pem",
@@ -68,6 +77,17 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 		{"metadata", "/api/v1/metadata/" + strconv.FormatInt(versionID, 10), 200, []string{"known_function", `"project_id"`}},
 		{"metadata invalid", "/api/v1/metadata/0", 400, []string{"positive integer"}},
 		{"metadata missing", "/api/v1/metadata/999999", 404, []string{"metadata version not found"}},
+		{"pushes", "/api/v1/pushes?q=sample&username=&project_id=" + strconv.FormatInt(projectID, 10), 200, []string{`"source":"native"`, `"changed_functions":1`}},
+		{"push", "/api/v1/pushes/" + strconv.FormatInt(pushes[0].ID, 10), 200, []string{`"changes"`, `"known_function"`}},
+		{"push missing", "/api/v1/pushes/999999", 404, []string{"push not found"}},
+		{"history", "/api/v1/history?q=known&hash=" + hash, 200, []string{`"operation":"create"`, `"known_function"`}},
+		{"history diff", "/api/v1/history/" + strconv.FormatInt(changes[0].ID, 10), 200, []string{`"fields"`, `"field":"name"`}},
+		{"history missing", "/api/v1/history/999999", 404, []string{"history record not found"}},
+		{"history bad hash", "/api/v1/history?hash=bad", 400, []string{"exactly 32"}},
+		{"push bad project", "/api/v1/pushes?project_id=nope", 400, []string{"positive integer"}},
+		{"history bad push", "/api/v1/history?push_id=0", 400, []string{"positive integer"}},
+		{"history bad from", "/api/v1/history?from=yesterday", 400, []string{"RFC3339"}},
+		{"history reversed range", "/api/v1/history?from=2026-07-28T12%3A00%3A00Z&to=2026-07-27T12%3A00%3A00Z", 400, []string{"must not be later"}},
 		{"legacy file", "/api/files/" + md5, 200, []string{`"len":64`, `"name":"known_function"`}},
 		{"legacy file invalid", "/api/files/nope", 400, []string{"exactly 32"}},
 		{"legacy function", "/api/funcs/" + hash, 200, []string{`"name":"known_function"`, `"Function"`, `"in_files"`}},
@@ -96,6 +116,72 @@ func TestEveryReadOnlyManagementRoute(t *testing.T) {
 				t.Error("security middleware header missing")
 			}
 		})
+	}
+}
+
+func TestHistoryManagementAPI(t *testing.T) {
+	db, hash, _ := populatedWebStore(t)
+	changes, err := db.ListHistory(context.Background(), store.HistoryFilter{}, 10, 0)
+	if err != nil || len(changes) != 1 {
+		t.Fatalf("history: %#v, %v", changes, err)
+	}
+	pushes, err := db.ListPushes(context.Background(), store.PushFilter{}, 10, 0)
+	if err != nil || len(pushes) != 1 {
+		t.Fatalf("pushes: %#v, %v", pushes, err)
+	}
+	changeID := strconv.FormatInt(changes[0].ID, 10)
+	pushID := strconv.FormatInt(pushes[0].ID, 10)
+	server := newWebTestServer(t, config.Config{AdminToken: "secret", AllowDeletes: true}, db)
+	defer server.Close()
+
+	for _, test := range []struct {
+		name, method, path, token string
+		status                    int
+	}{
+		{"restore unauthorized", http.MethodPost, "/api/v1/history/" + changeID + "/restore", "", http.StatusUnauthorized},
+		{"restore bad id", http.MethodPost, "/api/v1/history/nope/restore", "secret", http.StatusBadRequest},
+		{"restore missing", http.MethodPost, "/api/v1/history/999999/restore", "secret", http.StatusNotFound},
+		{"delete history unauthorized", http.MethodDelete, "/api/v1/history/" + changeID, "", http.StatusUnauthorized},
+		{"delete push unauthorized", http.MethodDelete, "/api/v1/pushes/" + pushID, "", http.StatusUnauthorized},
+		{"delete history missing", http.MethodDelete, "/api/v1/history/999999", "secret", http.StatusNotFound},
+		{"delete push missing", http.MethodDelete, "/api/v1/pushes/999999", "secret", http.StatusNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := accountRequest(t, server, test.method, test.path, "", test.token)
+			defer response.Body.Close()
+			if response.StatusCode != test.status {
+				body, _ := io.ReadAll(response.Body)
+				t.Fatalf("status %d, want %d: %s", response.StatusCode, test.status, body)
+			}
+		})
+	}
+
+	response := accountRequest(t, server, http.MethodPost, "/api/v1/history/"+changeID+"/restore", "", "secret")
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusCreated || !strings.Contains(string(body), `"operation":"restore"`) {
+		t.Fatalf("restore status %d: %s", response.StatusCode, body)
+	}
+	restored := store.HistoryChange{}
+	if err := json.Unmarshal(body, &restored); err != nil {
+		t.Fatal(err)
+	}
+	response = accountRequest(t, server, http.MethodDelete,
+		"/api/v1/history/"+strconv.FormatInt(restored.ID, 10), "", "secret")
+	if response.StatusCode != http.StatusOK {
+		body, _ = io.ReadAll(response.Body)
+		t.Fatalf("delete restored history status %d: %s", response.StatusCode, body)
+	}
+	response.Body.Close()
+	response = accountRequest(t, server, http.MethodDelete, "/api/v1/pushes/"+pushID, "", "secret")
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `"deleted_changes":1`) {
+		t.Fatalf("delete push status %d: %s", response.StatusCode, body)
+	}
+	versions, err := db.Function(context.Background(), hash)
+	if err != nil || len(versions) != 0 {
+		t.Fatalf("push deletion left versions %#v, %v", versions, err)
 	}
 }
 
@@ -186,6 +272,8 @@ func TestProjectAndMetadataDeletesDisabled(t *testing.T) {
 	for _, path := range []string{
 		"/api/v1/projects/" + strconv.FormatInt(projects[0].ID, 10),
 		"/api/v1/metadata/" + strconv.FormatInt(versions[0].ID, 10),
+		"/api/v1/pushes/1",
+		"/api/v1/history/1",
 	} {
 		response := accountRequest(t, server, http.MethodDelete, path, "", "")
 		if response.StatusCode != http.StatusForbidden {
@@ -394,8 +482,12 @@ func TestManagementDatabaseFailures(t *testing.T) {
 	db, hash, md5 := populatedWebStore(t)
 	projects, _ := db.ListProjects(context.Background(), "", 10, 0)
 	versions, _ := db.Function(context.Background(), hash)
+	pushes, _ := db.ListPushes(context.Background(), store.PushFilter{}, 10, 0)
+	changes, _ := db.ListHistory(context.Background(), store.HistoryFilter{}, 10, 0)
 	projectID := strconv.FormatInt(projects[0].ID, 10)
 	versionID := strconv.FormatInt(versions[0].ID, 10)
+	pushID := strconv.FormatInt(pushes[0].ID, 10)
+	changeID := strconv.FormatInt(changes[0].ID, 10)
 	server := newWebTestServer(t, config.Config{AllowDeletes: true}, db)
 	defer server.Close()
 	if err := db.Close(); err != nil {
@@ -414,6 +506,10 @@ func TestManagementDatabaseFailures(t *testing.T) {
 		{"/api/v1/projects", http.StatusInternalServerError},
 		{"/api/v1/projects/" + projectID, http.StatusInternalServerError},
 		{"/api/v1/metadata/" + versionID, http.StatusInternalServerError},
+		{"/api/v1/pushes", http.StatusInternalServerError},
+		{"/api/v1/pushes/" + pushID, http.StatusInternalServerError},
+		{"/api/v1/history", http.StatusInternalServerError},
+		{"/api/v1/history/" + changeID, http.StatusInternalServerError},
 		{"/api/files/" + md5, http.StatusInternalServerError},
 		{"/api/funcs/" + hash, http.StatusInternalServerError},
 	}
@@ -434,6 +530,9 @@ func TestManagementDatabaseFailures(t *testing.T) {
 		{http.MethodDelete, "/api/v1/projects/" + projectID, ""},
 		{http.MethodPatch, "/api/v1/metadata/" + versionID, `{"name":"x"}`},
 		{http.MethodDelete, "/api/v1/metadata/" + versionID, ""},
+		{http.MethodPost, "/api/v1/history/" + changeID + "/restore", ""},
+		{http.MethodDelete, "/api/v1/history/" + changeID, ""},
+		{http.MethodDelete, "/api/v1/pushes/" + pushID, ""},
 	} {
 		response := accountRequest(t, server, test.method, test.path, test.body, "")
 		if response.StatusCode != http.StatusInternalServerError {

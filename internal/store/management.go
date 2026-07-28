@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
@@ -157,9 +158,19 @@ func (s *Store) UpdateFunctionVersion(ctx context.Context, id int64, name string
 	}
 	defer tx.Rollback()
 	var projectID int64
+	var currentName string
+	var currentLength uint32
+	var currentMetadata []byte
 	if err := tx.QueryRowContext(ctx,
-		"SELECT database_id FROM functions WHERE id=$1", id).Scan(&projectID); err != nil {
+		"SELECT database_id, name, length, metadata FROM functions WHERE id=$1", id).
+		Scan(&projectID, &currentName, &currentLength, &currentMetadata); err != nil {
 		return FunctionVersion{}, err
+	}
+	if currentName == name && currentLength == length && bytes.Equal(currentMetadata, rawMetadata) {
+		if err := tx.Rollback(); err != nil {
+			return FunctionVersion{}, err
+		}
+		return s.FunctionVersion(ctx, id)
 	}
 	score := metadata.Score(rawMetadata)
 	result, err := tx.ExecContext(ctx, `
@@ -176,19 +187,7 @@ WHERE id=$5`, name, length, rawMetadata, score, id)
 	if affected == 0 {
 		return FunctionVersion{}, sql.ErrNoRows
 	}
-	pushID, err := upsertID(ctx, tx, `
-INSERT INTO pushes (
-  database_id, source, username, hostname, idb_path, file_path, file_md5,
-  submitted_functions, changed_functions
-)
-SELECT db.id, 'admin', COALESCE(NULLIF(db.auth_username, ''), a.username, ''),
-       u.hostname, db.idb_path, db.file_path, fi.checksum, 1, 1
-FROM databases db
-JOIN users u ON u.id=db.user_id
-JOIN files fi ON fi.id=db.file_id
-LEFT JOIN auth_accounts a ON a.id=db.auth_account_id
-WHERE db.id=$1
-RETURNING id`, projectID)
+	pushID, err := insertAdminPushTx(ctx, tx, projectID, "admin")
 	if err != nil {
 		return FunctionVersion{}, err
 	}

@@ -87,6 +87,16 @@ FROM pushes ORDER BY id LIMIT 1`).Scan(&protocolVersion, &source, &submitted, &c
 	if stats.Pushes != 4 || stats.HistoryRecords != 3 {
 		t.Fatalf("admin ledger stats = %#v", stats)
 	}
+	if _, err := s.UpdateFunctionVersion(ctx, versions[0].ID, "admin_name", 48, []byte{5, 6}); err != nil {
+		t.Fatal(err)
+	}
+	unchangedStats, err := s.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchangedStats.Pushes != stats.Pushes || unchangedStats.HistoryRecords != stats.HistoryRecords {
+		t.Fatalf("identical admin save created history: before=%#v after=%#v", stats, unchangedStats)
+	}
 	var operation string
 	if err := s.db.QueryRowContext(ctx,
 		"SELECT operation FROM function_changes ORDER BY id DESC LIMIT 1").Scan(&operation); err != nil {

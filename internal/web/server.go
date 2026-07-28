@@ -53,6 +53,13 @@ func New(cfg config.Config, store *store.Store, metrics *observability.Metrics, 
 	mux.HandleFunc("GET /api/v1/metadata/{id}", s.getMetadata)
 	mux.HandleFunc("PATCH /api/v1/metadata/{id}", s.updateMetadata)
 	mux.HandleFunc("DELETE /api/v1/metadata/{id}", s.deleteMetadata)
+	mux.HandleFunc("GET /api/v1/pushes", s.listPushes)
+	mux.HandleFunc("GET /api/v1/pushes/{id}", s.getPush)
+	mux.HandleFunc("DELETE /api/v1/pushes/{id}", s.deletePush)
+	mux.HandleFunc("GET /api/v1/history", s.listHistory)
+	mux.HandleFunc("GET /api/v1/history/{id}", s.getHistory)
+	mux.HandleFunc("POST /api/v1/history/{id}/restore", s.restoreHistory)
+	mux.HandleFunc("DELETE /api/v1/history/{id}", s.deleteHistory)
 	mux.HandleFunc("GET /api/v1/accounts", s.listAccounts)
 	mux.HandleFunc("POST /api/v1/accounts", s.createAccount)
 	mux.HandleFunc("PUT /api/v1/accounts/{username}/password", s.setAccountPassword)
@@ -471,6 +478,160 @@ func (s *Server) deleteMetadata(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (s *Server) listPushes(w http.ResponseWriter, r *http.Request) {
+	limit, offset := pagination(r)
+	from, to, ok := timeRange(w, r)
+	if !ok {
+		return
+	}
+	projectID, ok := optionalQueryID(w, r, "project_id")
+	if !ok {
+		return
+	}
+	pushes, err := s.store.ListPushes(r.Context(), store.PushFilter{
+		Search: r.URL.Query().Get("q"), Username: r.URL.Query().Get("username"),
+		ProjectID: projectID, From: from, To: to,
+	}, limit, offset)
+	if err != nil {
+		s.internalError(w, "list pushes", err)
+		return
+	}
+	if pushes == nil {
+		pushes = []store.PushSummary{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": pushes, "limit": limit, "offset": offset})
+}
+
+func (s *Server) getPush(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	push, err := s.store.PushRecord(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "push not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, "get push", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, push)
+}
+
+func (s *Server) deletePush(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeletion(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	result, err := s.store.DeletePush(r.Context(), id)
+	if err != nil {
+		s.internalError(w, "delete push", err)
+		return
+	}
+	if !result.Found {
+		writeError(w, http.StatusNotFound, "push not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) listHistory(w http.ResponseWriter, r *http.Request) {
+	limit, offset := pagination(r)
+	from, to, ok := timeRange(w, r)
+	if !ok {
+		return
+	}
+	projectID, ok := optionalQueryID(w, r, "project_id")
+	if !ok {
+		return
+	}
+	pushID, ok := optionalQueryID(w, r, "push_id")
+	if !ok {
+		return
+	}
+	hash := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("hash")))
+	if hash != "" {
+		raw, err := hex.DecodeString(hash)
+		if err != nil || len(raw) != 16 {
+			writeError(w, http.StatusBadRequest, "hash must contain exactly 32 hexadecimal characters")
+			return
+		}
+	}
+	changes, err := s.store.ListHistory(r.Context(), store.HistoryFilter{
+		Search: r.URL.Query().Get("q"), Username: r.URL.Query().Get("username"), Hash: hash,
+		ProjectID: projectID, PushID: pushID, From: from, To: to,
+	}, limit, offset)
+	if err != nil {
+		s.internalError(w, "list history", err)
+		return
+	}
+	if changes == nil {
+		changes = []store.HistoryChange{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": changes, "limit": limit, "offset": offset})
+}
+
+func (s *Server) getHistory(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	diff, err := s.store.FunctionChangeDiff(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "history record not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, "get history record", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, diff)
+}
+
+func (s *Server) restoreHistory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	change, err := s.store.RestoreFunctionChange(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "history record not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, "restore history record", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, change)
+}
+
+func (s *Server) deleteHistory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDeletion(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	result, err := s.store.DeleteFunctionChange(r.Context(), id)
+	if err != nil {
+		s.internalError(w, "delete history record", err)
+		return
+	}
+	if !result.Found {
+		writeError(w, http.StatusNotFound, "history record not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pagination(r)
 	files, err := s.store.ListFiles(r.Context(), r.URL.Query().Get("q"), limit, offset)
@@ -633,6 +794,47 @@ func pagination(r *http.Request) (int, int) {
 		offset = 0
 	}
 	return limit, offset
+}
+
+func optionalQueryID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
+	value := strings.TrimSpace(r.URL.Query().Get(name))
+	if value == "" {
+		return 0, true
+	}
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, name+" must be a positive integer")
+		return 0, false
+	}
+	return id, true
+}
+
+func timeRange(w http.ResponseWriter, r *http.Request) (*time.Time, *time.Time, bool) {
+	parse := func(name string) (*time.Time, bool) {
+		value := strings.TrimSpace(r.URL.Query().Get(name))
+		if value == "" {
+			return nil, true
+		}
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, name+" must be an RFC3339 timestamp")
+			return nil, false
+		}
+		return &parsed, true
+	}
+	from, ok := parse("from")
+	if !ok {
+		return nil, nil, false
+	}
+	to, ok := parse("to")
+	if !ok {
+		return nil, nil, false
+	}
+	if from != nil && to != nil && from.After(*to) {
+		writeError(w, http.StatusBadRequest, "from must not be later than to")
+		return nil, nil, false
+	}
+	return from, to, true
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

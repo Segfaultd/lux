@@ -151,6 +151,14 @@ func TestStoreValidationAndClosedDatabaseErrors(t *testing.T) {
 		{"function version", func() error { _, err := s.FunctionVersion(ctx, 1); return err }},
 		{"update function version", func() error { _, err := s.UpdateFunctionVersion(ctx, 1, "a", 1, nil); return err }},
 		{"delete function version", func() error { _, err := s.DeleteFunctionVersion(ctx, 1); return err }},
+		{"list pushes", func() error { _, err := s.ListPushes(ctx, PushFilter{}, 1, 0); return err }},
+		{"push record", func() error { _, err := s.PushRecord(ctx, 1); return err }},
+		{"list history", func() error { _, err := s.ListHistory(ctx, HistoryFilter{}, 1, 0); return err }},
+		{"function change", func() error { _, err := s.FunctionChange(ctx, 1); return err }},
+		{"function change diff", func() error { _, err := s.FunctionChangeDiff(ctx, 1); return err }},
+		{"restore function change", func() error { _, err := s.RestoreFunctionChange(ctx, 1); return err }},
+		{"delete function change", func() error { _, err := s.DeleteFunctionChange(ctx, 1); return err }},
+		{"delete push", func() error { _, err := s.DeletePush(ctx, 1); return err }},
 	}
 	for _, test := range errorCalls {
 		t.Run(test.name, func(t *testing.T) {
