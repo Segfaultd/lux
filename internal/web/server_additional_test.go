@@ -591,6 +591,112 @@ func TestSessionManagementAPI(t *testing.T) {
 	}
 }
 
+func TestAccountSecurityChangesRevokeSessions(t *testing.T) {
+	db, err := store.Open(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	authService := auth.New(db)
+	if err := authService.Bootstrap(context.Background(), "guest", "guest password"); err != nil {
+		t.Fatal(err)
+	}
+	analyst, err := authService.CreateWithRole(
+		context.Background(), "analyst", "analyst password", access.RoleContributor,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authService.Create(context.Background(), "backup", "backup password"); err != nil {
+		t.Fatal(err)
+	}
+	registry := session.NewRegistry()
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	server := httptest.NewServer(NewWithSessions(
+		config.Config{AdminToken: "secret"}, db, observability.NewMetrics(), log, registry,
+	).Handler())
+	defer server.Close()
+
+	register := func() net.Conn {
+		client, peer := net.Pipe()
+		registry.Register(session.Identity{
+			AccountID: analyst.ID, Username: analyst.Username, Role: analyst.Role,
+		}, session.Track(peer))
+		return client
+	}
+	assertRevoked := func(client net.Conn) {
+		t.Helper()
+		defer client.Close()
+		if _, err := client.Write([]byte("closed")); err == nil {
+			t.Fatal("security change left the client connected")
+		}
+		if active := registry.List(); len(active) != 0 {
+			t.Fatalf("revoked session remains registered: %#v", active)
+		}
+	}
+
+	client := register()
+	response := accountRequest(t, server, http.MethodPatch,
+		"/api/v1/accounts/analyst", `{"role":"reader"}`, "secret")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("role change status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	assertRevoked(client)
+
+	client = register()
+	response = accountRequest(t, server, http.MethodPut,
+		"/api/v1/accounts/analyst/password", `{"password":"rotated password"}`, "secret")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("password change status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	assertRevoked(client)
+
+	client = register()
+	response = accountRequest(t, server, http.MethodPatch,
+		"/api/v1/accounts/analyst", `{"enabled":false}`, "secret")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("disable status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	assertRevoked(client)
+	response = accountRequest(t, server, http.MethodPatch,
+		"/api/v1/accounts/analyst", `{"enabled":true}`, "secret")
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("enable status %d", response.StatusCode)
+	}
+
+	client = register()
+	response = accountRequest(t, server, http.MethodDelete,
+		"/api/v1/accounts/analyst", "", "secret")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("delete status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	assertRevoked(client)
+
+	response = accountRequest(t, server, http.MethodPost, "/api/v1/accounts",
+		`{"username":"operator","password":"operator password","role":"admin"}`, "secret")
+	response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create status %d", response.StatusCode)
+	}
+	for _, piece := range []string{
+		"authentication account created",
+		"authentication account password changed",
+		"authentication account updated",
+		"authentication account deleted",
+		"terminated_sessions=1",
+	} {
+		if !strings.Contains(logs.String(), piece) {
+			t.Errorf("audit log missing %q: %s", piece, logs.String())
+		}
+	}
+}
+
 func TestManagementDeleteAuthorizationAndOutcomes(t *testing.T) {
 	t.Run("disabled", func(t *testing.T) {
 		db, hash, _ := populatedWebStore(t)

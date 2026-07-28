@@ -229,6 +229,33 @@ func TestDynamicDatabaseAuthentication(t *testing.T) {
 	waitConnection(t, done)
 }
 
+func TestAuthenticationFailuresAreAudited(t *testing.T) {
+	db, err := store.Open(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := auth.New(db).Bootstrap(context.Background(), "guest", "valid password"); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	server := New(
+		config.Config{ServerName: "unit", HelloWait: time.Second},
+		db,
+		observability.NewMetrics(),
+		slog.New(slog.NewTextHandler(&logs, nil)),
+	)
+	conn, done := startDirectConnection(server)
+	sendHello(t, conn, 5, &protocol.Credentials{Username: "guest", Password: "wrong password"})
+	assertFailure(t, readPacket(t, conn), 1, "invalid username")
+	conn.Close()
+	waitConnection(t, done)
+	if output := logs.String(); !strings.Contains(output, "Lumina authentication failed") ||
+		!strings.Contains(output, "username=guest") {
+		t.Fatalf("authentication failure was not audited: %s", output)
+	}
+}
+
 func TestRoleCapabilitiesAreEnforced(t *testing.T) {
 	db, hash := populatedLuminaStore(t)
 	authService := auth.New(db)

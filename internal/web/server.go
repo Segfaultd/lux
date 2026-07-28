@@ -173,6 +173,8 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 		s.writeAuthError(w, err)
 		return
 	}
+	s.log.Info("authentication account created",
+		"account_id", account.ID, "username", account.Username, "role", account.Role)
 	writeJSON(w, http.StatusCreated, account)
 }
 
@@ -191,6 +193,10 @@ func (s *Server) setAccountPassword(w http.ResponseWriter, r *http.Request) {
 		s.writeAuthError(w, err)
 		return
 	}
+	terminated := s.sessions.TerminateAccount(account.ID)
+	s.log.Info("authentication account password changed",
+		"account_id", account.ID, "username", account.Username,
+		"terminated_sessions", terminated)
 	writeJSON(w, http.StatusOK, account)
 }
 
@@ -220,6 +226,13 @@ func (s *Server) setAccountEnabled(w http.ResponseWriter, r *http.Request) {
 		s.writeAuthError(w, err)
 		return
 	}
+	terminated := 0
+	if request.Role != nil || (request.Enabled != nil && !*request.Enabled) {
+		terminated = s.sessions.TerminateAccount(account.ID)
+	}
+	s.log.Info("authentication account updated",
+		"account_id", account.ID, "username", account.Username, "role", account.Role,
+		"enabled", account.Enabled, "terminated_sessions", terminated)
 	writeJSON(w, http.StatusOK, account)
 }
 
@@ -232,6 +245,10 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 		s.writeAuthError(w, err)
 		return
 	}
+	terminated := s.sessions.TerminateAccount(account.ID)
+	s.log.Info("authentication account deleted",
+		"account_id", account.ID, "username", account.Username,
+		"terminated_sessions", terminated)
 	writeJSON(w, http.StatusOK, account)
 }
 
@@ -261,6 +278,9 @@ func (s *Server) terminateSession(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "terminate Lumina session", err)
 		return
 	}
+	s.log.Info("Lumina session terminated",
+		"session", terminated.ID, "account_id", terminated.AccountID,
+		"username", terminated.Username, "remote", terminated.RemoteAddress)
 	writeJSON(w, http.StatusOK, map[string]any{"terminated": terminated})
 }
 
@@ -274,6 +294,8 @@ func (s *Server) terminateAccountSessions(w http.ResponseWriter, r *http.Request
 		return
 	}
 	terminated := s.sessions.TerminateUsername(username)
+	s.log.Info("Lumina account sessions terminated",
+		"username", username, "terminated_sessions", terminated)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username": username, "terminated": terminated,
 	})

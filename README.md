@@ -78,7 +78,7 @@ Set `LUX_LOG_LEVEL=debug` for protocol and request diagnostics.
 
 Lumina usernames, roles, and bcrypt password hashes are stored in PostgreSQL. On the first startup, Lux creates an administrator from `LUX_USERNAME` and `LUX_PASSWORD`; later environment changes do not overwrite database-managed credentials. Accounts created later default to the contributor role.
 
-Open **Authentication** in the management console to add accounts, change roles, rotate passwords, enable or disable access, and remove accounts without restarting Lux. Readers can pull metadata and inspect history, contributors can additionally push metadata, and administrators can additionally delete native history when deletion is globally enabled. The management token is required. Lux prevents disabling or deleting the final enabled account, and historical metadata remains attached to its original username even if that account is later removed. Changes affect new IDA connections; already-connected clients retain their authenticated role until disconnect.
+Open **Authentication** in the management console to add accounts, change roles, rotate passwords, enable or disable access, and remove accounts without restarting Lux. Readers can pull metadata and inspect history, contributors can additionally push metadata, and administrators can additionally delete native history when deletion is globally enabled. The management token is required. Lux prevents disabling or deleting the final enabled account, and historical metadata remains attached to its original username even if that account is later removed. Password rotation, role changes, disablement, and deletion immediately disconnect every active session for the affected account.
 
 ### TLS and IDA certificate pinning
 

@@ -121,6 +121,8 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	principal, err := s.auth.Authenticate(authCtx, hello.Credentials.Username, hello.Credentials.Password)
 	cancel()
 	if errors.Is(err, auth.ErrInvalidCredentials) {
+		s.log.Warn("Lumina authentication failed",
+			"remote", remote, "username", hello.Credentials.Username)
 		s.fail(conn, 1, s.cfg.ServerName+": invalid username or password.")
 		return
 	}
