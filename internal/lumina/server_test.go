@@ -6,9 +6,11 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/protocol"
@@ -25,6 +27,9 @@ func TestHelloPushPullRoundTrip(t *testing.T) {
 	cfg := config.Config{
 		ServerName: "lux-test", Username: "guest", HistoryLimit: 10,
 		HelloWait: time.Second, CommandWait: time.Second, PullWait: time.Second,
+	}
+	if err := auth.New(db).Bootstrap(context.Background(), cfg.Username, cfg.Password); err != nil {
+		t.Fatal(err)
 	}
 	server := New(cfg, db, observability.NewMetrics(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -83,6 +88,13 @@ func TestHelloPushPullRoundTrip(t *testing.T) {
 	}
 	if packet.Code != protocol.CodePushMetadataResult {
 		t.Fatalf("push response code %#x", packet.Code)
+	}
+	versions, err := db.Function(context.Background(), strings.Repeat("33", 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 1 || versions[0].Username != "guest" {
+		t.Fatalf("push account attribution: %#v", versions)
 	}
 
 	var pull protocol.Encoder

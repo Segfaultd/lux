@@ -23,6 +23,12 @@ func TestPushPullAndManagementQueries(t *testing.T) {
 		LicenseData:   []byte("license"),
 		Hostname:      "analyst-one",
 	}
+	account, err := s.CreateAuthAccount(ctx, "analyst", []byte("test-hash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity.AccountID = account.ID
+	identity.Username = account.Username
 
 	first := protocol.PushMetadata{
 		IDBPath:  "first.i64",
@@ -86,7 +92,7 @@ func TestPushPullAndManagementQueries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(versions) != 2 || len(versions[0].Comments) != 1 {
+	if len(versions) != 2 || len(versions[0].Comments) != 1 || versions[0].Username != "analyst" {
 		t.Fatalf("unexpected versions: %#v", versions)
 	}
 
@@ -96,6 +102,19 @@ func TestPushPullAndManagementQueries(t *testing.T) {
 	}
 	if status[0] != 0 {
 		t.Fatalf("update should not be new: %v", status)
+	}
+	if _, err := s.CreateAuthAccount(ctx, "backup", []byte("test-hash")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteAuthAccount(ctx, "analyst"); err != nil {
+		t.Fatal(err)
+	}
+	versions, err = s.Function(ctx, bytesToHex(hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 2 || versions[0].Username != "analyst" {
+		t.Fatalf("deleted account attribution was not preserved: %#v", versions)
 	}
 	deleted, err := s.DeleteHashes(ctx, [][]byte{hash})
 	if err != nil {

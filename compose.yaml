@@ -36,6 +36,8 @@ services:
       PGPASSWORD: "${LUX_POSTGRES_PASSWORD:-lux}"
       PGSSLMODE: disable
       LUX_SERVER_NAME: "lux"
+      LUX_USERNAME: "${LUX_USERNAME:-guest}"
+      LUX_PASSWORD: "${LUX_PASSWORD:-change-me}"
       LUX_ADMIN_TOKEN: "${LUX_ADMIN_TOKEN:-change-me}"
       LUX_ALLOW_DELETES: "${LUX_ALLOW_DELETES:-false}"
 

@@ -68,6 +68,7 @@ func TestRunGracefulCancellation(t *testing.T) {
 			"-shutdown-timeout", "1s",
 		})
 	}()
+	time.Sleep(100 * time.Millisecond)
 	cancel()
 	select {
 	case err := <-done:

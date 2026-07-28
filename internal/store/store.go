@@ -23,6 +23,7 @@ type Stats struct {
 	Versions  int64 `json:"versions"`
 	Files     int64 `json:"files"`
 	Users     int64 `json:"users"`
+	Accounts  int64 `json:"accounts"`
 	Databases int64 `json:"databases"`
 }
 
@@ -47,6 +48,7 @@ type FunctionVersion struct {
 	FilePath  string             `json:"file_path"`
 	IDBPath   string             `json:"idb_path"`
 	Hostname  string             `json:"hostname"`
+	Username  string             `json:"username"`
 	PushedAt  string             `json:"pushed_at"`
 	UpdatedAt string             `json:"updated_at"`
 }
@@ -62,7 +64,30 @@ type PushIdentity struct {
 	LicenseNumber []byte
 	LicenseData   []byte
 	Hostname      string
+	AccountID     int64
+	Username      string
 }
+
+type AuthAccount struct {
+	ID          int64  `json:"id"`
+	Username    string `json:"username"`
+	Enabled     bool   `json:"enabled"`
+	PasswordSet bool   `json:"password_set"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+	LastLoginAt string `json:"last_login_at,omitempty"`
+}
+
+type AuthAccountRecord struct {
+	AuthAccount
+	PasswordHash []byte
+}
+
+var (
+	ErrAuthAccountExists   = errors.New("authentication account already exists")
+	ErrAuthAccountNotFound = errors.New("authentication account not found")
+	ErrLastAuthAccount     = errors.New("cannot remove or disable the last enabled authentication account")
+)
 
 func Open(connectionURL string) (*Store, error) {
 	db, err := sql.Open("pgx", connectionURL)
@@ -91,6 +116,16 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate(ctx context.Context) error {
 	const schema = `
+CREATE TABLE IF NOT EXISTS auth_accounts (
+  id BIGSERIAL PRIMARY KEY,
+  username TEXT NOT NULL,
+  password_hash BYTEA,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_login_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_accounts_username ON auth_accounts ((lower(username)));
 CREATE TABLE IF NOT EXISTS users (
   id BIGSERIAL PRIMARY KEY,
   license_id BYTEA NOT NULL,
@@ -109,9 +144,14 @@ CREATE TABLE IF NOT EXISTS databases (
   idb_path TEXT NOT NULL,
   file_id BIGINT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE (file_id, user_id, idb_path)
+  auth_account_id BIGINT REFERENCES auth_accounts(id) ON DELETE SET NULL,
+  auth_username TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE databases ADD COLUMN IF NOT EXISTS auth_account_id BIGINT REFERENCES auth_accounts(id) ON DELETE SET NULL;
+ALTER TABLE databases ADD COLUMN IF NOT EXISTS auth_username TEXT NOT NULL DEFAULT '';
+ALTER TABLE databases DROP CONSTRAINT IF EXISTS databases_file_id_user_id_idb_path_key;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_databases_identity ON databases (file_id, user_id, idb_path, auth_username);
 CREATE TABLE IF NOT EXISTS functions (
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL,
@@ -142,6 +182,7 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		{&out.Versions, "SELECT COUNT(*) FROM functions"},
 		{&out.Files, "SELECT COUNT(*) FROM files"},
 		{&out.Users, "SELECT COUNT(*) FROM users"},
+		{&out.Accounts, "SELECT COUNT(*) FROM auth_accounts"},
 		{&out.Databases, "SELECT COUNT(*) FROM databases"},
 	}
 	for _, q := range queries {
@@ -206,9 +247,12 @@ RETURNING id`, request.MD5[:])
 		return nil, err
 	}
 	databaseID, err := upsertID(ctx, tx, `
-INSERT INTO databases (file_path, idb_path, file_id, user_id) VALUES ($1, $2, $3, $4)
-ON CONFLICT (file_id, user_id, idb_path) DO UPDATE SET file_path=excluded.file_path
-RETURNING id`, request.FilePath, request.IDBPath, fileID, userID)
+INSERT INTO databases (file_path, idb_path, file_id, user_id, auth_account_id, auth_username) VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (file_id, user_id, idb_path, auth_username) DO UPDATE SET
+  file_path=excluded.file_path,
+  auth_account_id=excluded.auth_account_id,
+  auth_username=excluded.auth_username
+RETURNING id`, request.FilePath, request.IDBPath, fileID, userID, nullableID(identity.AccountID), identity.Username)
 	if err != nil {
 		return nil, err
 	}
@@ -355,11 +399,13 @@ func (s *Store) Function(ctx context.Context, hash string) ([]FunctionVersion, e
 	rows, err := s.db.QueryContext(ctx, `
 SELECT fn.id, encode(fn.checksum, 'hex'), fn.name, fn.length, fn.score, fn.metadata,
        encode(fi.checksum, 'hex'), db.file_path, db.idb_path, u.hostname,
+       COALESCE(NULLIF(db.auth_username, ''), a.username, ''),
        fn.pushed_at, fn.updated_at
 FROM functions fn
 JOIN databases db ON db.id=fn.database_id
 JOIN files fi ON fi.id=db.file_id
 JOIN users u ON u.id=db.user_id
+LEFT JOIN auth_accounts a ON a.id=db.auth_account_id
 WHERE fn.checksum=$1
 ORDER BY fn.score DESC, fn.updated_at DESC, fn.id DESC`, raw)
 	if err != nil {
@@ -372,7 +418,7 @@ ORDER BY fn.score DESC, fn.updated_at DESC, fn.id DESC`, raw)
 		var md []byte
 		var pushedAt, updatedAt time.Time
 		if err := rows.Scan(&f.ID, &f.Hash, &f.Name, &f.Length, &f.Score, &md,
-			&f.FileMD5, &f.FilePath, &f.IDBPath, &f.Hostname, &pushedAt, &updatedAt); err != nil {
+			&f.FileMD5, &f.FilePath, &f.IDBPath, &f.Hostname, &f.Username, &pushedAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		f.Metadata = hex.EncodeToString(md)
@@ -493,4 +539,11 @@ func parseHash(value string) ([]byte, error) {
 
 func formatTime(value time.Time) string {
 	return value.UTC().Format(time.RFC3339)
+}
+
+func nullableID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
 }

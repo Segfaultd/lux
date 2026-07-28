@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/protocol"
@@ -20,12 +21,13 @@ import (
 type Server struct {
 	cfg     config.Config
 	store   *store.Store
+	auth    *auth.Service
 	metrics *observability.Metrics
 	log     *slog.Logger
 }
 
 func New(cfg config.Config, store *store.Store, metrics *observability.Metrics, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, store: store, metrics: metrics, log: log}
+	return &Server{cfg: cfg, store: store, auth: auth.New(store), metrics: metrics, log: log}
 }
 
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
@@ -101,13 +103,21 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 	s.metrics.RecordVersion(hello.ProtocolVersion)
-	if hello.Credentials != nil {
-		validUser := hello.Credentials.Username == s.cfg.Username
-		validPassword := s.cfg.Password == "" || hello.Credentials.Password == s.cfg.Password
-		if !validUser || !validPassword {
-			s.fail(conn, 1, s.cfg.ServerName+": invalid username or password.")
-			return
-		}
+	if hello.Credentials == nil {
+		s.fail(conn, 1, s.cfg.ServerName+": username and password required.")
+		return
+	}
+	authCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	principal, err := s.auth.Authenticate(authCtx, hello.Credentials.Username, hello.Credentials.Password)
+	cancel()
+	if errors.Is(err, auth.ErrInvalidCredentials) {
+		s.fail(conn, 1, s.cfg.ServerName+": invalid username or password.")
+		return
+	}
+	if err != nil {
+		s.log.Error("authenticate Lumina client", "error", err)
+		s.fail(conn, 3, s.cfg.ServerName+": authentication database error; try again later.")
+		return
 	}
 	if hello.ProtocolVersion <= 4 {
 		if err := protocol.WritePacket(conn, protocol.CodeOK, nil); err != nil {
@@ -139,13 +149,13 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			return
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-		if !s.handlePacket(ctx, conn, hello, packet) {
+		if !s.handlePacket(ctx, conn, hello, principal, packet) {
 			return
 		}
 	}
 }
 
-func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello protocol.Hello, packet protocol.Packet) bool {
+func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello protocol.Hello, principal auth.Principal, packet protocol.Packet) bool {
 	switch packet.Code {
 	case protocol.CodePullMetadata:
 		req, err := protocol.DecodePullMetadata(packet.Payload)
@@ -193,6 +203,8 @@ func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello proto
 			LicenseNumber: hello.LicenseNumber[:],
 			LicenseData:   hello.LicenseData,
 			Hostname:      req.Hostname,
+			AccountID:     principal.ID,
+			Username:      principal.Username,
 		}, req)
 		if err != nil {
 			s.log.Error("push metadata", "error", err)

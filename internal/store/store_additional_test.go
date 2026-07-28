@@ -205,6 +205,63 @@ func TestPushNormalizesNilIdentityAndMigrationIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPushSeparatesAuthenticationAccountsForTheSameIDB(t *testing.T) {
+	s, err := Open(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	alice, err := s.CreateAuthAccount(ctx, "alice", []byte("hash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := s.CreateAuthAccount(ctx, "bob", []byte("hash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := bytes.Repeat([]byte{0x6a}, 16)
+	request := protocol.PushMetadata{
+		IDBPath: "shared.i64", FilePath: "shared.bin",
+		Funcs: []protocol.PushFunction{{Name: "shared_function", Hash: hash}},
+	}
+	identity := PushIdentity{
+		LicenseNumber: []byte{1}, LicenseData: []byte{2}, Hostname: "shared-host",
+		AccountID: alice.ID, Username: alice.Username,
+	}
+	status, err := s.Push(ctx, identity, request)
+	if err != nil || len(status) != 1 || status[0] != 1 {
+		t.Fatalf("alice push %v: %v", status, err)
+	}
+	identity.AccountID, identity.Username = bob.ID, bob.Username
+	status, err = s.Push(ctx, identity, request)
+	if err != nil || len(status) != 1 || status[0] != 1 {
+		t.Fatalf("bob push %v: %v", status, err)
+	}
+	versions, err := s.Function(ctx, bytesToHex(hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("account-specific versions: %#v", versions)
+	}
+	usernames := map[string]bool{versions[0].Username: true, versions[1].Username: true}
+	if !usernames["alice"] || !usernames["bob"] {
+		t.Fatalf("account attribution: %#v", versions)
+	}
+	if _, err := s.DeleteAuthAccount(ctx, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	versions, err = s.Function(ctx, bytesToHex(hash))
+	if err != nil || len(versions) != 2 {
+		t.Fatalf("versions after account deletion: %#v, %v", versions, err)
+	}
+	usernames = map[string]bool{versions[0].Username: true, versions[1].Username: true}
+	if !usernames["alice"] || !usernames["bob"] {
+		t.Fatalf("historical attribution after account deletion: %#v", versions)
+	}
+}
+
 func populatedStore(t *testing.T) (*Store, []byte, []byte, [16]byte) {
 	t.Helper()
 	s, err := Open(testdb.URL(t))

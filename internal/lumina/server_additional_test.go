@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/observability"
 	"github.com/segfaultd/lux/internal/protocol"
@@ -31,11 +32,20 @@ func TestHelloVariantsAndWrongPort(t *testing.T) {
 	t.Run("legacy protocol gets OK", func(t *testing.T) {
 		server := newLuminaTestServer(t, config.Config{Username: "guest"})
 		conn, done := startDirectConnection(server)
-		sendHello(t, conn, 4, nil)
+		sendHello(t, conn, 4, &protocol.Credentials{Username: "guest"})
 		packet := readPacket(t, conn)
 		if packet.Code != protocol.CodeOK || len(packet.Payload) != 0 {
 			t.Fatalf("unexpected hello response: %#v", packet)
 		}
+		conn.Close()
+		waitConnection(t, done)
+	})
+
+	t.Run("credentials required", func(t *testing.T) {
+		server := newLuminaTestServer(t, config.Config{ServerName: "unit"})
+		conn, done := startDirectConnection(server)
+		sendHello(t, conn, 5, nil)
+		assertFailure(t, readPacket(t, conn), 1, "required")
 		conn.Close()
 		waitConnection(t, done)
 	})
@@ -68,7 +78,7 @@ func TestHelloVariantsAndWrongPort(t *testing.T) {
 			{Username: "guest", Password: "wrong"},
 		} {
 			server := newLuminaTestServer(t, config.Config{
-				ServerName: "unit", Username: "guest", Password: "secret",
+				ServerName: "unit", Username: "guest", Password: "valid secret",
 			})
 			conn, done := startDirectConnection(server)
 			sendHello(t, conn, 5, &creds)
@@ -108,13 +118,72 @@ func TestHelloAndCommandTimeouts(t *testing.T) {
 			HelloWait: time.Second, CommandWait: 20 * time.Millisecond,
 		})
 		conn, done := startDirectConnection(server)
-		sendHello(t, conn, 5, nil)
+		sendHello(t, conn, 5, &protocol.Credentials{Username: "guest"})
 		if packet := readPacket(t, conn); packet.Code != protocol.CodeHelloResult {
 			t.Fatalf("hello code %#x", packet.Code)
 		}
 		waitConnection(t, done)
 		conn.Close()
 	})
+}
+
+func TestDynamicDatabaseAuthentication(t *testing.T) {
+	db, err := store.Open(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	authService := auth.New(db)
+	if err := authService.Bootstrap(context.Background(), "guest", "initial password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authService.Create(context.Background(), "analyst", "analyst password"); err != nil {
+		t.Fatal(err)
+	}
+	server := testServerWithStore(t, config.Config{
+		ServerName: "unit", Username: "ignored-static-value", Password: "ignored-static-value",
+		HelloWait: time.Second, CommandWait: time.Second,
+	}, db)
+
+	for _, credentials := range []protocol.Credentials{
+		{Username: "guest", Password: "initial password"},
+		{Username: "ANALYST", Password: "analyst password"},
+	} {
+		conn, done := startDirectConnection(server)
+		sendHello(t, conn, 5, &credentials)
+		if packet := readPacket(t, conn); packet.Code != protocol.CodeHelloResult {
+			t.Fatalf("%s login response %#x", credentials.Username, packet.Code)
+		}
+		conn.Close()
+		waitConnection(t, done)
+	}
+
+	if _, err := authService.SetPassword(context.Background(), "analyst", "rotated password"); err != nil {
+		t.Fatal(err)
+	}
+	conn, done := startDirectConnection(server)
+	sendHello(t, conn, 5, &protocol.Credentials{Username: "analyst", Password: "analyst password"})
+	assertFailure(t, readPacket(t, conn), 1, "invalid username")
+	conn.Close()
+	waitConnection(t, done)
+
+	if _, err := authService.SetEnabled(context.Background(), "analyst", false); err != nil {
+		t.Fatal(err)
+	}
+	conn, done = startDirectConnection(server)
+	sendHello(t, conn, 5, &protocol.Credentials{Username: "analyst", Password: "rotated password"})
+	assertFailure(t, readPacket(t, conn), 1, "invalid username")
+	conn.Close()
+	waitConnection(t, done)
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	conn, done = startDirectConnection(server)
+	sendHello(t, conn, 5, &protocol.Credentials{Username: "guest", Password: "initial password"})
+	assertFailure(t, readPacket(t, conn), 3, "authentication database")
+	conn.Close()
+	waitConnection(t, done)
 }
 
 func TestMalformedAndUnsupportedCommands(t *testing.T) {
@@ -195,7 +264,7 @@ func TestDeleteAndHistoryCommands(t *testing.T) {
 
 	t.Run("delete and history success", func(t *testing.T) {
 		db, hash := populatedLuminaStore(t)
-		server := testServerWithStore(config.Config{
+		server := testServerWithStore(t, config.Config{
 			ServerName: "unit", AllowDeletes: true, HistoryLimit: 10,
 			HelloWait: time.Second, CommandWait: time.Second, PullWait: time.Second,
 		}, db)
@@ -256,7 +325,7 @@ func TestDeleteAndHistoryCommands(t *testing.T) {
 
 func TestDatabaseFailuresBecomeRPCFailures(t *testing.T) {
 	db, hash := populatedLuminaStore(t)
-	server := testServerWithStore(config.Config{
+	server := testServerWithStore(t, config.Config{
 		ServerName: "unit", AllowDeletes: true, HistoryLimit: 10,
 		HelloWait: time.Second, CommandWait: time.Second, PullWait: time.Second,
 	}, db)
@@ -402,12 +471,16 @@ func newLuminaTestServer(t *testing.T, cfg config.Config) *Server {
 	if cfg.PullWait == 0 {
 		cfg.PullWait = time.Second
 	}
-	return testServerWithStore(cfg, db)
+	return testServerWithStore(t, cfg, db)
 }
 
-func testServerWithStore(cfg config.Config, db *store.Store) *Server {
+func testServerWithStore(t *testing.T, cfg config.Config, db *store.Store) *Server {
+	t.Helper()
 	if cfg.Username == "" {
 		cfg.Username = "guest"
+	}
+	if err := auth.New(db).Bootstrap(context.Background(), cfg.Username, cfg.Password); err != nil {
+		t.Fatal(err)
 	}
 	return New(cfg, db, observability.NewMetrics(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 }

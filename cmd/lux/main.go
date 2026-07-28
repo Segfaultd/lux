@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/segfaultd/lux/internal/auth"
 	"github.com/segfaultd/lux/internal/config"
 	"github.com/segfaultd/lux/internal/lumina"
 	"github.com/segfaultd/lux/internal/observability"
@@ -46,6 +47,12 @@ func run(parent context.Context, args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer db.Close()
+	if parent.Err() != nil {
+		return nil
+	}
+	if err := auth.New(db).Bootstrap(parent, cfg.Username, cfg.Password); err != nil {
+		return fmt.Errorf("bootstrap authentication account: %w", err)
+	}
 
 	luminaListener, err := net.Listen("tcp", cfg.LuminaAddr)
 	if err != nil {
