@@ -25,6 +25,7 @@ is not a behavioral specification for Lux.
 | Replace current metadata only when the submitted metadata is better | Implemented |
 | Explicit override and do-not-override push modes | Implemented |
 | Server-side metadata merge push mode | Planned |
+| Exact `score_metadata()` parity | Oracle exporter implemented; real IDA fixtures required |
 | Immutable push and accepted-change history | Implemented |
 | Function-history retrieval and deletion | Implemented |
 | Pull frequency and `PULL_MD_SEEN_FILE` behavior | Implemented |
@@ -46,11 +47,11 @@ change the native Lumina RPC results returned to IDA.
 ## Scoring authority
 
 Hex-Rays exports `ida_lumina.score_metadata(func_info_t)` but does not publish
-its implementation. Lux therefore keeps score fixtures generated inside IDA
-9.3 or newer. `tools/ida/export_lumina_scores.py` extracts real function
-metadata and the score returned by IDA. The Go scorer is tested against those
-fixtures. New IDA releases can be checked by regenerating the fixture file and
-running the normal Go test suite.
+its implementation. `tools/ida/export_lumina_scores.py` extracts real function
+metadata and the score returned by IDA 9.3 or newer. This workspace has no IDA
+installation, so no fixture is presented as authoritative yet. The current Go
+scorer remains provisional until fixtures produced by a licensed IDA
+installation are added and its results are proven against them.
 
 Lux does not add contributor trust, review weights, or project-specific ranking
 to native pull selection.

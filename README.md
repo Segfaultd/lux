@@ -177,12 +177,25 @@ metadata, and immutable history.
 Native behavior follows the official compatibility matrix. Management features
 that do not exist in the IDA protocol remain isolated HTTP extensions.
 
+### IDA scoring oracle
+
+The exact `ida_lumina.score_metadata()` formula is not public. To capture
+authoritative fixtures from IDA 9.3 or newer, open an IDB and run:
+
+```sh
+ida -A -S"/absolute/path/to/tools/ida/export_lumina_scores.py /tmp/ida-scores.json" sample.i64
+```
+
+The exporter records each function's exact metadata bytes and the score
+returned by IDA. See the compatibility document before treating Lux's
+provisional scorer as byte-for-byte compatible.
+
 ## Development
 
 ```sh
 docker compose up -d postgres
 export LUX_TEST_DATABASE_URL='postgres://lux:lux@127.0.0.1:55432/lux?sslmode=disable'
-go test ./...
+make test
 make coverage
 go vet ./...
 go build ./cmd/lux

@@ -5,6 +5,7 @@ build:
 
 test:
 	go test ./...
+	python3 -m unittest discover -s tools/ida -p "test_*.py"
 
 coverage:
 	go test -race -coverprofile=coverage.out ./...
