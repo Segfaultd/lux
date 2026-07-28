@@ -205,6 +205,7 @@ func (s *Server) handlePacket(parent context.Context, conn net.Conn, hello proto
 			Hostname:      req.Hostname,
 			AccountID:     principal.ID,
 			Username:      principal.Username,
+			Protocol:      hello.ProtocolVersion,
 		}, req)
 		if err != nil {
 			s.log.Error("push metadata", "error", err)

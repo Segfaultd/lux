@@ -151,10 +151,21 @@ func (s *Store) FunctionVersion(ctx context.Context, id int64) (FunctionVersion,
 }
 
 func (s *Store) UpdateFunctionVersion(ctx context.Context, id int64, name string, length uint32, rawMetadata []byte) (FunctionVersion, error) {
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return FunctionVersion{}, err
+	}
+	defer tx.Rollback()
+	var projectID int64
+	if err := tx.QueryRowContext(ctx,
+		"SELECT database_id FROM functions WHERE id=$1", id).Scan(&projectID); err != nil {
+		return FunctionVersion{}, err
+	}
+	score := metadata.Score(rawMetadata)
+	result, err := tx.ExecContext(ctx, `
 UPDATE functions
 SET name=$1, length=$2, metadata=$3, score=$4, updated_at=CURRENT_TIMESTAMP
-WHERE id=$5`, name, length, rawMetadata, metadata.Score(rawMetadata), id)
+WHERE id=$5`, name, length, rawMetadata, score, id)
 	if err != nil {
 		return FunctionVersion{}, err
 	}
@@ -164,6 +175,31 @@ WHERE id=$5`, name, length, rawMetadata, metadata.Score(rawMetadata), id)
 	}
 	if affected == 0 {
 		return FunctionVersion{}, sql.ErrNoRows
+	}
+	pushID, err := upsertID(ctx, tx, `
+INSERT INTO pushes (
+  database_id, source, username, hostname, idb_path, file_path, file_md5,
+  submitted_functions, changed_functions
+)
+SELECT db.id, 'admin', COALESCE(NULLIF(db.auth_username, ''), a.username, ''),
+       u.hostname, db.idb_path, db.file_path, fi.checksum, 1, 1
+FROM databases db
+JOIN users u ON u.id=db.user_id
+JOIN files fi ON fi.id=db.file_id
+LEFT JOIN auth_accounts a ON a.id=db.auth_account_id
+WHERE db.id=$1
+RETURNING id`, projectID)
+	if err != nil {
+		return FunctionVersion{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO function_changes (push_id, function_id, name, length, metadata, score, operation)
+VALUES ($1, $2, $3, $4, $5, $6, 'admin-edit')`,
+		pushID, id, name, length, rawMetadata, score); err != nil {
+		return FunctionVersion{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return FunctionVersion{}, err
 	}
 	return s.FunctionVersion(ctx, id)
 }
