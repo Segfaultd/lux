@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Lux private IDA Lumina server management console">
+  <title>Lux · Lumina management</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <a class="brand" href="/" aria-label="Lux home">
+        <span class="mark">LX</span>
+        <span><strong>lux</strong><small>Lumina management</small></span>
+      </a>
+      <div class="status"><i></i><span id="server-status">Connecting</span></div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <p class="eyebrow">PRIVATE SYMBOL INTELLIGENCE</p>
+          <h1>Your team’s analysis,<br><em>remembered.</em></h1>
+          <p class="intro">Search the function knowledge your IDA clients have accumulated. Inspect every version, source database, and recovered comment.</p>
+        </div>
+        <aside class="connection-card">
+          <span>IDA CONNECTION</span>
+          <code id="lumina-address">—</code>
+          <div><b id="server-name">lux</b><small id="connection-flags">Loading configuration</small></div>
+        </aside>
+      </section>
+
+      <section class="stats" aria-label="Database statistics">
+        <article><span>Known functions</span><strong id="stat-functions">—</strong><small>unique signatures</small></article>
+        <article><span>Metadata versions</span><strong id="stat-versions">—</strong><small>across all databases</small></article>
+        <article><span>Analyzed files</span><strong id="stat-files">—</strong><small>source binaries</small></article>
+        <article><span>Contributors</span><strong id="stat-users">—</strong><small>IDA identities</small></article>
+      </section>
+
+      <section class="explorer">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">KNOWLEDGE EXPLORER</p>
+            <h2>Find what you already solved.</h2>
+          </div>
+          <div class="tabs" role="tablist">
+            <button class="active" data-tab="functions" role="tab">Functions</button>
+            <button data-tab="files" role="tab">Files</button>
+          </div>
+        </div>
+        <form id="search-form" class="search">
+          <label class="sr-only" for="search-input">Search</label>
+          <span>⌕</span>
+          <input id="search-input" autocomplete="off" placeholder="Search by function name or 128-bit hash">
+          <button>Search</button>
+        </form>
+        <div id="results" class="results" aria-live="polite"></div>
+        <div class="pagination">
+          <button id="previous" disabled>← Previous</button>
+          <span id="page-label">Page 1</span>
+          <button id="next">Next →</button>
+        </div>
+      </section>
+    </main>
+    <footer><span>lux / private Lumina infrastructure</span><a href="/metrics">Prometheus metrics ↗</a></footer>
+  </div>
+
+  <dialog id="detail-dialog">
+    <div class="dialog-head">
+      <div><p class="eyebrow">FUNCTION RECORD</p><h2 id="detail-title">Function</h2></div>
+      <button id="dialog-close" aria-label="Close">×</button>
+    </div>
+    <code id="detail-hash" class="hash"></code>
+    <div id="detail-content"></div>
+    <div class="danger-zone" id="danger-zone">
+      <div><strong>Remove this signature</strong><small>Deletes every stored version of this function.</small></div>
+      <button id="delete-button">Delete function</button>
+    </div>
+  </dialog>
+
+  <dialog id="token-dialog">
+    <form id="token-form">
+      <p class="eyebrow">ADMINISTRATOR ACCESS</p>
+      <h2>Enter the management token</h2>
+      <p>Lux requires the token configured on the server before it accepts destructive actions.</p>
+      <label for="token-input">Admin token</label>
+      <input id="token-input" type="password" autocomplete="current-password" required>
+      <div class="dialog-actions"><button type="button" id="token-cancel">Cancel</button><button>Continue</button></div>
+    </form>
+  </dialog>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
