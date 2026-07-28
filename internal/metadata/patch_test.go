@@ -109,6 +109,10 @@ func TestApplyPatchValidation(t *testing.T) {
 		{Offset: &offset, Type: "anterior", Text: "one"},
 		{Offset: &offset, Type: "anterior", Text: "two"},
 	}
+	duplicateEmptyExtra := []Comment{
+		{Offset: &offset, Type: "posterior", Text: ""},
+		{Offset: &offset, Type: "posterior", Text: ""},
+	}
 	tests := []struct {
 		name    string
 		request PatchRequest
@@ -132,6 +136,7 @@ func TestApplyPatchValidation(t *testing.T) {
 		{"comment type", PatchRequest{Mutations: []Mutation{{Operation: "append", Code: uint32Pointer(5), Comments: &badCommentType}}}, "instruction"},
 		{"extra type", PatchRequest{Mutations: []Mutation{{Operation: "append", Code: uint32Pointer(7), Comments: &badCommentType}}}, ""},
 		{"duplicate extra", PatchRequest{Mutations: []Mutation{{Operation: "append", Code: uint32Pointer(7), Comments: &duplicateExtra}}}, "duplicates"},
+		{"duplicate empty extra", PatchRequest{Mutations: []Mutation{{Operation: "append", Code: uint32Pointer(7), Comments: &duplicateEmptyExtra}}}, "duplicates"},
 		{"empty comments valid", PatchRequest{Mutations: []Mutation{{Operation: "append", Code: uint32Pointer(5), Comments: &emptyComments}}}, ""},
 	}
 	for _, tt := range tests {

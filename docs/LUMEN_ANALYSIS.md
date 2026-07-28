@@ -80,7 +80,9 @@ Lux adds an `auth_accounts` table for runtime-managed Lumina credentials. Each d
 
 Lumen does not merge versions. For a pull it groups rows by function checksum, finds the maximum rank, and returns a row with that rank. Rank is ten points for each useful decoded comment. Known IDA/compiler-generated boilerplate comments are excluded.
 
-Lux ports the metadata chunk parser and scoring rules. It makes tie-breaking explicit—score descending, update time descending, row ID descending—so one deterministic record is returned even if several versions have the same score. Lux also reports the number of stored versions as popularity, where Lumen currently returns zero.
+Lux ports the metadata chunk parser and scoring rules. It also implements a lossless structured document model for all current SDK keys. Types, timing, comments, and stack points are decoded into fields; frame and operand chunks are identified but kept opaque because their standalone `opinfo_t` wire grammar is not public. Unknown keys are retained verbatim. This permits semantic history diffs and field-level editing without discarding metadata added by newer IDA versions.
+
+Tie-breaking is explicit—score descending, update time descending, row ID descending—so one deterministic record is returned even if several versions have the same score. Lux also reports the number of stored versions as popularity, where Lumen currently returns zero.
 
 ## HTTP behavior
 
@@ -91,7 +93,7 @@ Lumen's optional Warp server provides:
 - `/api/funcs/{hash}`: best function metadata with decoded comments and containing files
 - `/metrics`: Prometheus exposition
 
-Lux retains both read-only API shapes, adds versioned management endpoints, and embeds an interactive console. Mutations are disabled by default and can be protected by a bearer token.
+Lux retains both read-only API shapes, adds versioned management endpoints, and embeds an interactive console. The console includes raw and structured metadata inspection, typed chunk editing, and semantic revision diffs. Mutations are disabled by default and can be protected by a bearer token.
 
 ## Deliberate Lux differences
 

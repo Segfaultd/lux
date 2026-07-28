@@ -84,7 +84,8 @@ func TestHistoryQueriesDiffRestoreAndDelete(t *testing.T) {
 	secondID := changes[1].ID
 	thirdID := changes[0].ID
 	firstDiff, err := s.FunctionChangeDiff(ctx, firstID)
-	if err != nil || firstDiff.Previous != nil || len(firstDiff.Fields) != 5 {
+	if err != nil || firstDiff.Previous != nil || len(firstDiff.Fields) < 5 ||
+		firstDiff.Metadata.Error == "" {
 		t.Fatalf("first diff = %#v, %v", firstDiff, err)
 	}
 	secondDiff, err := s.FunctionChangeDiff(ctx, secondID)

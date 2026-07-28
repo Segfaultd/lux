@@ -307,6 +307,10 @@ func updateSummary(summary *Summary, chunk Chunk) {
 		summary.DecodeFailures++
 	}
 	summary.Comments += len(chunk.Comments)
+	if (chunk.Code == KeyFunctionComment || chunk.Code == KeyFunctionRepeatComment) &&
+		chunk.Text != nil && *chunk.Text != "" {
+		summary.Comments++
+	}
 	summary.StackPoints += len(chunk.StackPoints)
 	switch chunk.Code {
 	case KeyType:

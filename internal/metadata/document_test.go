@@ -50,7 +50,7 @@ func TestDecodeStructuredMetadataAndRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected document: %#v", doc)
 	}
 	if doc.Summary.KnownChunks != 11 || doc.Summary.UnknownChunks != 1 ||
-		doc.Summary.Comments != 4 || doc.Summary.StackPoints != 2 ||
+		doc.Summary.Comments != 6 || doc.Summary.StackPoints != 2 ||
 		!doc.Summary.HasType || !doc.Summary.HasFrame || doc.Summary.OperandChunks != 2 {
 		t.Fatalf("unexpected summary: %#v", doc.Summary)
 	}

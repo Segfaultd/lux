@@ -227,6 +227,8 @@ type extraComment struct {
 func encodeExtraComments(comments []Comment) ([]byte, error) {
 	var values []offsetValue[extraComment]
 	positions := make(map[uint32]int)
+	anteriorSet := make(map[uint32]bool)
+	posteriorSet := make(map[uint32]bool)
 	for i, comment := range comments {
 		if comment.Offset == nil {
 			return nil, fmt.Errorf("comment %d offset is required", i)
@@ -242,15 +244,17 @@ func encodeExtraComments(comments []Comment) ([]byte, error) {
 		}
 		value := &values[position].value
 		if comment.Type == "anterior" {
-			if value.anterior != "" {
+			if anteriorSet[*comment.Offset] {
 				return nil, fmt.Errorf("comment %d duplicates an anterior comment at offset %d", i, *comment.Offset)
 			}
 			value.anterior = comment.Text
+			anteriorSet[*comment.Offset] = true
 		} else {
-			if value.posterior != "" {
+			if posteriorSet[*comment.Offset] {
 				return nil, fmt.Errorf("comment %d duplicates a posterior comment at offset %d", i, *comment.Offset)
 			}
 			value.posterior = comment.Text
+			posteriorSet[*comment.Offset] = true
 		}
 	}
 	return encodeOffsetValues(values, func(out *protocol.Encoder, comment extraComment) {

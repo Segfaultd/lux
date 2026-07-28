@@ -12,7 +12,7 @@ Lux was independently implemented from the protocol behavior in the sibling `lum
 - Immutable push and per-function revision history with native IDA history responses
 - PostgreSQL persistence with connection pooling, foreign keys, and automatic schema creation
 - Optional TLS with a PEM certificate and key
-- Embedded administration console for accounts, IDB projects, pushes, revision diffs, files, functions, raw metadata versions, decoded comments, restore, and protected deletion
+- Embedded administration console for accounts, IDB projects, pushes, semantic revision diffs, files, functions, structured/raw metadata versions, restore, and protected deletion
 - JSON management API, Lumen-compatible read-only HTTP routes, health check, and Prometheus metrics
 - One static, CGO-free binary and a small scratch-based container image
 
@@ -118,6 +118,8 @@ IDA pins the Lumina server certificate. Copy the public certificate to `hexrays.
 | `GET` | `/api/v1/metadata/{id}` | Inspect one function metadata version |
 | `PATCH` | `/api/v1/metadata/{id}` | Change a version's name, length, or metadata bytes |
 | `DELETE` | `/api/v1/metadata/{id}` | Delete one metadata version |
+| `GET` | `/api/v1/metadata/{id}/structured` | Decode a version into lossless Lumina metadata chunks |
+| `PATCH` | `/api/v1/metadata/{id}/structured` | Set, remove, or append metadata chunks |
 | `GET`, `POST` | `/api/v1/accounts` | List or create IDA login accounts |
 | `PUT` | `/api/v1/accounts/{username}/password` | Rotate an account password |
 | `PATCH` | `/api/v1/accounts/{username}` | Enable or disable an account |
@@ -130,6 +132,36 @@ Push and history searches accept `q`, `username`, `project_id`, `from`, and `to`
 Compatibility aliases are available at `GET /api/files/{md5}` and `GET /api/funcs/{hash}`.
 
 The management listener serves plain HTTP. Bind it to localhost or put it behind an HTTPS reverse proxy when it is reachable over an untrusted network; bearer tokens should never travel over unencrypted public connections.
+
+### Structured metadata
+
+IDA stores function metadata as a sequence of `[key][length][payload]` chunks. Lux recognizes the current SDK keys:
+
+| Code | Field | Lux decoding/editing |
+|---:|---|---|
+| 1 | Function prototype and serialized types | Source flag plus lossless type/field hex |
+| 2 | Decompiler elapsed time | Signed 64-bit seconds |
+| 3–4 | Function regular/repeatable comments | UTF-8 text |
+| 5–6 | Instruction regular/repeatable comments | Offset and UTF-8 text |
+| 7 | Anterior/posterior comments | Offset, kind, and UTF-8 text |
+| 8 | User-defined stack points | Offset and signed stack delta |
+| 9 | Frame description and stack variables | Named, sized, and preserved as raw payload |
+| 10–11 | Operand and extended operand representations | Named, sized, and preserved as raw payload |
+
+Frame members and operand representations contain IDA-internal `opinfo_t` variants without a public standalone wire grammar. Lux therefore does not guess at those fields: the explorer exposes their exact payload, and any untouched chunk is reproduced byte-for-byte. Unknown future keys receive the same treatment. This keeps metadata from newer IDA releases safe when an older Lux instance views or edits another field.
+
+The structured patch endpoint accepts ordered mutations. `set` and `remove` require a zero-based chunk `index`; `append` requires a non-zero `code`. A mutation must contain exactly one value: `text`, `elapsed_seconds`, `type`, `comments`, `stack_points`, or raw hexadecimal `payload`.
+
+```json
+{
+  "mutations": [
+    {"operation": "set", "index": 1, "text": "reviewed"},
+    {"operation": "append", "code": 99, "payload": "deadbeef"}
+  ]
+}
+```
+
+Structured edits create the same immutable administrative push/revision records as raw edits. History detail responses contain both decoded documents and field-level semantic differences such as `metadata.function_comment`.
 
 ## Design notes from Lumen
 
