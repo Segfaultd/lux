@@ -1,0 +1,19 @@
+services:
+  lux:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "1234:1234"
+      - "8080:8080"
+    environment:
+      LUX_LUMINA_ADDR: ":1234"
+      LUX_HTTP_ADDR: ":8080"
+      LUX_DATABASE: "/data/lux.db"
+      LUX_SERVER_NAME: "lux"
+      LUX_ADMIN_TOKEN: "${LUX_ADMIN_TOKEN:-change-me}"
+      LUX_ALLOW_DELETES: "${LUX_ALLOW_DELETES:-false}"
+    volumes:
+      - lux-data:/data
+
+volumes:
+  lux-data:
